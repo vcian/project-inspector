@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability report
+    url: https://github.com/BhaumikJoshi/project-inspector/security/advisories/new
+    about: Please report vulnerabilities privately (do not open a public issue).
+  - name: Support and usage
+    url: https://github.com/BhaumikJoshi/project-inspector/blob/main/SUPPORT.md
+    about: Read support guidance before opening new issues.

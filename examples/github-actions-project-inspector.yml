@@ -1,0 +1,34 @@
+# Example: run project-inspector on push/PR and upload SARIF to GitHub Code Scanning.
+# Copy to .github/workflows/project-inspector.yml and adjust paths / Node version.
+name: project-inspector
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run project-inspector
+        run: npx project-inspector scan --mode deep --out project-report
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: success() || failure()
+        with:
+          sarif_file: project-report/results.sarif

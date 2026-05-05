@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify quality gates
+        run: npm run typecheck && npm run lint && npm test
+
+      - name: Build package
+        run: npm run build
+
+      - name: Publish to npm (provenance)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          {
+            echo "body<<EOF"
+            echo "## Release ${{ github.ref_name }}"
+            echo
+            echo "- Automated release from CI"
+            echo "- Includes provenance-attested npm package"
+            echo
+            echo "See CHANGELOG.md for full details."
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          body: ${{ steps.notes.outputs.body }}

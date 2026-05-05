@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-inspector.local/schemas/decision.json",
+  "title": "project-inspector production decision",
+  "type": "object",
+  "required": ["version", "verdict", "confidenceNote", "blockers", "quickWins", "majorRisks", "nextSteps", "topCritical", "gateOk", "readinessScore"],
+  "properties": {
+    "version": { "const": 1 },
+    "verdict": { "type": "string", "enum": ["READY", "NOT_READY"] },
+    "confidenceNote": { "type": "string" },
+    "blockers": { "type": "array", "items": { "type": "string" } },
+    "quickWins": { "type": "array", "items": { "type": "string" } },
+    "majorRisks": { "type": "array", "items": { "type": "string" } },
+    "nextSteps": { "type": "array", "items": { "type": "string" } },
+    "gateOk": { "type": "boolean" },
+    "readinessScore": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "topCritical": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rank", "severity", "relFile", "line", "title", "engine", "rootCause", "fix", "verify", "attackChain"],
+        "properties": {
+          "rank": { "type": "integer", "minimum": 1 },
+          "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
+          "relFile": { "type": "string" },
+          "line": { "type": "integer" },
+          "title": { "type": "string" },
+          "engine": { "type": "string" },
+          "rootCause": { "type": "string" },
+          "fix": { "type": "string" },
+          "verify": { "type": "string" },
+          "attackChain": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": true
+}
