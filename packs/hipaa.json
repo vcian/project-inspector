@@ -1,0 +1,7 @@
+{
+  "$schema": "policy-pack.schema.json",
+  "id": "hipaa",
+  "description": "Extra conservative suppressions for HIPAA-oriented reviews (tune per org).",
+  "extraSuppressTitleSubstrings": [],
+  "extraIgnorePathGlobs": ["**/fixtures/medical-records/**"]
+}

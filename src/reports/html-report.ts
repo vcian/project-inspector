@@ -45,11 +45,71 @@ export async function writeReportIndexHtml(result: ScanResult, outDir: string): 
   const mode = result.mode;
   const online = result.online ? 'yes' : 'no';
   const rules = await loadCodeOwnersRules(result.cwd);
+  const trustedList = result.trustedIssues ?? [];
+  const sevCounts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
+  const engMap = new Map<string, number>();
+  for (const i of trustedList) {
+    sevCounts[i.severity] += 1;
+    engMap.set(i.engine, (engMap.get(i.engine) ?? 0) + 1);
+  }
   const payload = {
     trusted: buildTrustedPayload(result, rules),
-    trustedTruncated: (result.trustedIssues?.length ?? 0) > 500,
+    trustedTruncated: trustedList.length > 500,
     baseline: result.baselineComparison ?? null,
+    baselineHistory: result.baselineHistory ?? [],
+    severityCounts: sevCounts,
+    engineCounts: Object.fromEntries([...engMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14)),
   };
+
+  const sevTotal =
+    sevCounts.CRITICAL + sevCounts.HIGH + sevCounts.MEDIUM + sevCounts.LOW;
+  let donutStyle = '';
+  if (sevTotal > 0) {
+    let a = 0;
+    const slice = (n: number, color: string): string => {
+      const deg = (n / sevTotal) * 360;
+      const s = `${color} ${String(a)}deg ${String(a + deg)}deg`;
+      a += deg;
+      return s;
+    };
+    donutStyle = [
+      slice(sevCounts.CRITICAL, '#991b1b'),
+      slice(sevCounts.HIGH, '#ea580c'),
+      slice(sevCounts.MEDIUM, '#ca8a04'),
+      slice(sevCounts.LOW, '#64748b'),
+    ].join(', ');
+  }
+
+  const engBars = [...engMap.entries()]
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, 12);
+  const engMax = Math.max(...engBars.map(([, n]) => n), 1);
+  const engHistHtml = engBars
+    .map(
+      ([e, n]) =>
+        `<div class="hbar"><span class="hb-label">${esc(e)}</span><div class="hb-track"><div class="hb-fill" style="width:${String(Math.round((n / engMax) * 100))}%"></div></div><span class="hb-num">${String(n)}</span></div>`,
+    )
+    .join('');
+
+  const hist = result.baselineHistory ?? [];
+  let sparkSvg = '';
+  if (hist.length >= 2) {
+    const ys = hist.map((h) => h.fingerprintCount);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const pad = 4;
+    const w = 220;
+    const h = 48;
+    const pts = ys
+      .map((y, i) => {
+        const x = pad + (i / Math.max(ys.length - 1, 1)) * (w - pad * 2);
+        const yn = maxY === minY ? 0.5 : (y - minY) / (maxY - minY);
+        const py = pad + (1 - yn) * (h - pad * 2);
+        return `${String(x)},${String(py)}`;
+      })
+      .join(' ');
+    sparkSvg = `<svg width="${String(w)}" height="${String(h)}" viewBox="0 0 ${String(w)} ${String(h)}" aria-label="baseline fingerprint trend"><polyline fill="none" stroke="currentColor" stroke-width="2" points="${pts}" /></svg>`;
+  }
 
   const axisRows = [
     ['Security', String(sc.security), diag?.axes.security],
@@ -110,9 +170,36 @@ export async function writeReportIndexHtml(result: ScanResult, outDir: string): 
     .toolbar select { padding: 0.35rem 0.5rem; }
     #trustedTable tbody tr.hidden { display: none; }
     .ev { font-size: 0.78rem; opacity: 0.88; max-width: 22rem; white-space: pre-wrap; word-break: break-word; }
+    .layout { display: grid; grid-template-columns: 11rem 1fr; gap: 1rem; align-items: start; }
+    @media (max-width: 52rem) { .layout { grid-template-columns: 1fr; } }
+    .sticky-aside { position: sticky; top: 0.5rem; align-self: start; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 0.35rem; padding: 0.5rem 0.65rem; background: color-mix(in srgb, Canvas 94%, CanvasText 6%); }
+    .chips { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.82rem; }
+    .viz { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; margin: 0.75rem 0; }
+    @media (max-width: 52rem) { .viz { grid-template-columns: 1fr; } }
+    .donut { width: 7rem; height: 7rem; border-radius: 50%; margin: 0.35rem auto; display: grid; place-items: center; }
+    .donut-hole { background: Canvas; width: 3rem; height: 3rem; border-radius: 50%; font-size: 0.72rem; display: grid; place-items: center; font-weight: 700; color: CanvasText; }
+    .hbar { display: grid; grid-template-columns: 6.5rem 1fr 2rem; gap: 0.35rem; align-items: center; font-size: 0.78rem; margin-bottom: 0.28rem; }
+    .hb-track { background: color-mix(in srgb, CanvasText 12%, transparent); border-radius: 2px; height: 0.55rem; overflow: hidden; }
+    .hb-fill { background: #2563eb; height: 100%; border-radius: 2px; }
+    @media (prefers-color-scheme: dark) {
+      .hb-fill { background: #60a5fa; }
+      th { background: color-mix(in srgb, CanvasText 8%, transparent); }
+    }
+    .spark { margin: 0.35rem 0; color: CanvasText; }
   </style>
 </head>
 <body>
+<div class="layout">
+<aside class="sticky-aside" aria-label="Verdict chips">
+  <div class="chips">
+    <strong>Verdict</strong>
+    <span class="pill ${verdict === 'READY' ? 'ready' : 'notready'}">${esc(verdict)}</span>
+    <strong>Readiness</strong><span>${String(sc.productionReadiness)}/100</span>
+    <strong>Gate</strong><span>${esc(gateLabel)}</span>
+    <strong>Trusted</strong><span>${String(trustedList.length)}</span>
+  </div>
+</aside>
+<main>
   <h1>Production readiness</h1>
   <p>
     <span class="pill ${verdict === 'READY' ? 'ready' : 'notready'}">${esc(verdict)}</span>
@@ -130,6 +217,27 @@ export async function writeReportIndexHtml(result: ScanResult, outDir: string): 
   ${diagNote.length > 0 ? `<p class="note">${diagNote}</p>` : ''}
 
   ${baselineBlock}
+
+  <h2>Severity &amp; engines</h2>
+  <div class="viz">
+    <div>
+      <h3>Severity (trusted)</h3>
+      ${
+        sevTotal > 0
+          ? `<div class="donut" style="background:conic-gradient(${donutStyle});"><span class="donut-hole">${String(sevTotal)}</span></div><p class="note">CRIT ${String(sevCounts.CRITICAL)} · HIGH ${String(sevCounts.HIGH)} · MED ${String(sevCounts.MEDIUM)} · LOW ${String(sevCounts.LOW)}</p>`
+          : '<p class="note">No trusted findings.</p>'
+      }
+    </div>
+    <div>
+      <h3>Engines</h3>
+      ${engHistHtml.length > 0 ? engHistHtml : '<p class="note">No findings.</p>'}
+    </div>
+  </div>
+  ${
+    hist.length >= 2
+      ? `<h3>Baseline fingerprint trend</h3><div class="spark">${sparkSvg}</div><p class="note">Recent snapshots from baseline history.</p>`
+      : ''
+  }
 
   <h2>Top issues (decision)</h2>
   <table>
@@ -158,8 +266,16 @@ export async function writeReportIndexHtml(result: ScanResult, outDir: string): 
     <li><a href="decision.json">decision.json</a> (<a href="schemas/decision.schema.json">JSON Schema</a>)</li>
     <li><a href="scores.json">scores.json</a></li>
     <li><a href="results.sarif">results.sarif</a></li>
+    <li><a href="openapi.json">openapi.json</a></li>
+    <li><a href="sbom.cdx.json">sbom.cdx.json</a></li>
+    <li><a href="osv-summary.json">osv-summary.json</a></li>
+    <li><a href="pr-comment.md">pr-comment.md</a></li>
+    <li><a href="governance-suppressions.json">governance-suppressions.json</a></li>
   </ul>
   <p class="note">Open via <code>file://</code>. CI example: <code>examples/github-actions-project-inspector.yml</code> in the package repo.</p>
+
+</main>
+</div>
 
   <script type="application/json" id="pi-data">${jsonPayload}</script>
   <script>

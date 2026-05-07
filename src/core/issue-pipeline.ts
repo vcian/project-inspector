@@ -1,6 +1,6 @@
 import { relative } from 'node:path';
 
-import type { InspectorConfig } from './inspector-config.js';
+import type { GovernanceSuppression, InspectorConfig } from './inspector-config.js';
 import type { Issue } from './types.js';
 
 function globToRegExp(pattern: string): RegExp {
@@ -17,6 +17,27 @@ function pathIgnored(relPosix: string, globs: readonly string[]): boolean {
     if (globToRegExp(g).test(relPosix)) {
       return true;
     }
+  }
+  return false;
+}
+
+function governanceMatches(issue: Issue, cwd: string, g: GovernanceSuppression): boolean {
+  const exp = Date.parse(g.expiresAt);
+  if (!Number.isFinite(exp) || exp <= Date.now()) {
+    return false;
+  }
+  if (g.issueId !== undefined && g.issueId.length > 0 && issue.id === g.issueId) {
+    return true;
+  }
+  const rel = relative(cwd, issue.file).replaceAll('\\', '/');
+  if (g.pathGlob !== undefined && g.pathGlob.length > 0 && globToRegExp(g.pathGlob).test(rel)) {
+    if (g.titleSubstring !== undefined && g.titleSubstring.length > 0) {
+      return issue.title.toLowerCase().includes(g.titleSubstring.toLowerCase());
+    }
+    return true;
+  }
+  if (g.titleSubstring !== undefined && g.titleSubstring.length > 0) {
+    return issue.title.toLowerCase().includes(g.titleSubstring.toLowerCase());
   }
   return false;
 }
@@ -46,8 +67,12 @@ export function applyIssuePipeline(
   const suppressedIds = new Set(config.suppressIssueIds.map((s) => s.toLowerCase()));
   const titleSubs = config.suppressTitleSubstrings.map((s) => s.toLowerCase());
 
+  const gov = config.governanceSuppressions ?? [];
   const filtered: Issue[] = [];
   for (const issue of issues) {
+    if (gov.some((g) => governanceMatches(issue, cwd, g))) {
+      continue;
+    }
     if (config.excludeLowConfidence && issue.confidence === 'low') {
       continue;
     }

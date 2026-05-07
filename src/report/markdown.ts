@@ -220,6 +220,15 @@ function renderGroupBlock(
   out.push(head.impact);
   out.push('');
 
+  out.push('#### Triage (why / fix / verify)');
+  out.push('');
+  out.push(
+    `- **Why it matters:** ${head.whyItMatters ?? head.description.slice(0, 200)}${head.description.length > 200 ? '…' : ''}`,
+  );
+  out.push(`- **Fix:** ${head.fix.slice(0, 220)}${head.fix.length > 220 ? '…' : ''}`);
+  out.push('- **Verify:** Re-run `project-inspector check`; add or extend tests touching this path.');
+  out.push('');
+
   if (head.whyItBlocks !== undefined && head.whyItBlocks.length > 0) {
     out.push('#### Performance note');
     out.push('');

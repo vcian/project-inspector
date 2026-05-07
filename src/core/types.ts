@@ -195,6 +195,13 @@ export interface TestCoverageScanResult {
     /** Small sample of matched test file paths, relative to project root. */
     readonly matchedSample: readonly string[];
   };
+  /** Line coverage from `coverage/lcov.info` when present. */
+  readonly lcovSummary?: {
+    readonly linesFound: number;
+    readonly linesHit: number;
+    readonly percentApprox: number;
+    readonly filesWithCoverage: number;
+  };
 }
 
 /** Parsed schema hints (Prisma / ORM / SQL DDL / inventory) for diagrams and maps — heuristic only. */
@@ -368,6 +375,11 @@ export interface ScanOptions {
   readonly skipLint?: boolean;
   /** After scan, overwrite trusted-issue fingerprint baseline in `project-report/.cache/` for delta views. */
   readonly saveBaseline?: boolean;
+  /**
+   * Optional file (one repo-relative path per line) used to scope `pr-comment.md` to changed files in CI.
+   * Alternately set env `PROJECT_INSPECTOR_PR_SCOPE` to a comma/newline-separated list.
+   */
+  readonly prScopeFile?: string;
 }
 
 /** Delta vs last `--save-baseline` snapshot (trusted fingerprints). */
@@ -376,6 +388,12 @@ export interface BaselineComparison {
   readonly newCount: number;
   readonly resolvedCount: number;
   readonly unchangedCount: number;
+}
+
+export interface BaselineHistoryEntry {
+  readonly savedAt: string;
+  readonly fingerprintCount: number;
+  readonly newVsPrevious?: number;
 }
 
 export interface Scores {
@@ -453,6 +471,8 @@ export interface ScanResult {
   readonly scoreDiagnostics?: ScoreDiagnostics;
   /** When a baseline file exists, compares trusted fingerprints to the last `--save-baseline` run. */
   readonly baselineComparison?: BaselineComparison;
+  /** Last N baseline snapshots (from `.cache/baseline-history.json`) when present. */
+  readonly baselineHistory?: readonly BaselineHistoryEntry[];
   /** Structured production readiness answer (see `production-decision.md`). */
   readonly productionDecision?: ProductionDecision;
   readonly timings?: readonly EngineTiming[];
@@ -460,6 +480,10 @@ export interface ScanResult {
   readonly totalDurationMs?: number;
   readonly budgetMs?: number;
   readonly budgetExceeded?: boolean;
+  /**
+   * Normalized repo-relative paths (forward slashes) for PR comment scoping, if provided via `prScopeFile` or env.
+   */
+  readonly prCommentScopePaths?: readonly string[];
 }
 
 export interface CheckFailure {

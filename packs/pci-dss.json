@@ -1,0 +1,6 @@
+{
+  "id": "pci-dss",
+  "description": "Skips sample PAN fixtures when present under this path.",
+  "extraSuppressTitleSubstrings": [],
+  "extraIgnorePathGlobs": ["**/fixtures/pan-samples/**"]
+}

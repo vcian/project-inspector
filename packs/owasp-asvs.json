@@ -1,0 +1,6 @@
+{
+  "id": "owasp-asvs",
+  "description": "Placeholder pack — extend with org-specific title substrings for ASVS alignment.",
+  "extraSuppressTitleSubstrings": [],
+  "extraIgnorePathGlobs": []
+}

@@ -30,6 +30,33 @@ export interface InspectorConfig {
    * Supports `*` wildcards, e.g. `/public/*`, `/auth/login`, `/webhooks/*`.
    */
   readonly intentionalPublicRouteGlobs?: readonly string[];
+  /** Structured suppressions with owner, reason, and expiry (governance). */
+  readonly governanceSuppressions?: readonly GovernanceSuppression[];
+  /** Import-layer rules (forbid imports matching patterns). */
+  readonly architecturePolicy?: ArchitecturePolicyConfig;
+  /**
+   * Optional policy pack id — loads `packs/<id>.json` (or `project-inspector-packs/<id>.json`) and merges
+   * extra suppressions / ignore globs.
+   */
+  readonly policyPack?: string;
+}
+
+export interface GovernanceSuppression {
+  readonly reason: string;
+  readonly owner: string;
+  /** ISO-8601 instant; suppression ignored after this time. */
+  readonly expiresAt: string;
+  readonly issueId?: string;
+  readonly titleSubstring?: string;
+  readonly pathGlob?: string;
+}
+
+export interface ArchitecturePolicyConfig {
+  readonly forbid?: readonly {
+    readonly fromPathGlob: string;
+    readonly importGlob: string;
+    readonly message?: string;
+  }[];
 }
 
 export const DEFAULT_INSPECTOR_CONFIG: InspectorConfig = {
@@ -55,10 +82,65 @@ export const DEFAULT_INSPECTOR_CONFIG: InspectorConfig = {
   excludeLowConfidence: false,
   testFileGlobs: [],
   intentionalPublicRouteGlobs: [],
+  governanceSuppressions: [],
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseGovernanceSuppressions(value: unknown): readonly GovernanceSuppression[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const out: GovernanceSuppression[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const reason = typeof item.reason === 'string' ? item.reason : '';
+    const owner = typeof item.owner === 'string' ? item.owner : '';
+    const expiresAt = typeof item.expiresAt === 'string' ? item.expiresAt : '';
+    if (reason.length === 0 || owner.length === 0 || expiresAt.length === 0) {
+      continue;
+    }
+    out.push({
+      reason,
+      owner,
+      expiresAt,
+      ...(typeof item.issueId === 'string' ? { issueId: item.issueId } : {}),
+      ...(typeof item.titleSubstring === 'string' ? { titleSubstring: item.titleSubstring } : {}),
+      ...(typeof item.pathGlob === 'string' ? { pathGlob: item.pathGlob } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function parseArchitecturePolicy(value: unknown): ArchitecturePolicyConfig | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const forbidRaw = value.forbid;
+  if (!Array.isArray(forbidRaw)) {
+    return undefined;
+  }
+  const forbid: Array<{ fromPathGlob: string; importGlob: string; message?: string }> = [];
+  for (const row of forbidRaw) {
+    if (!isRecord(row)) {
+      continue;
+    }
+    const fromPathGlob = typeof row.fromPathGlob === 'string' ? row.fromPathGlob : '';
+    const importGlob = typeof row.importGlob === 'string' ? row.importGlob : '';
+    if (fromPathGlob.length === 0 || importGlob.length === 0) {
+      continue;
+    }
+    forbid.push({
+      fromPathGlob,
+      importGlob,
+      ...(typeof row.message === 'string' ? { message: row.message } : {}),
+    });
+  }
+  return forbid.length > 0 ? { forbid } : undefined;
 }
 
 function asStringArray(value: unknown): readonly string[] | undefined {
@@ -97,6 +179,9 @@ export async function loadInspectorConfig(cwd: string): Promise<InspectorConfig>
     }
     const testFileGlobs = asStringArray(parsed.testFileGlobs) ?? [];
     const intentionalPublicRouteGlobs = asStringArray(parsed.intentionalPublicRouteGlobs) ?? [];
+    const governanceSuppressions = parseGovernanceSuppressions(parsed.governanceSuppressions);
+    const architecturePolicy = parseArchitecturePolicy(parsed.architecturePolicy);
+    const policyPack = typeof parsed.policyPack === 'string' && parsed.policyPack.length > 0 ? parsed.policyPack : undefined;
     return {
       version: 1,
       ignorePathGlobs,
@@ -106,6 +191,9 @@ export async function loadInspectorConfig(cwd: string): Promise<InspectorConfig>
       ...(gates !== undefined && Object.keys(gates).length > 0 ? { gates } : {}),
       ...(testFileGlobs.length > 0 ? { testFileGlobs } : {}),
       ...(intentionalPublicRouteGlobs.length > 0 ? { intentionalPublicRouteGlobs } : {}),
+      ...(governanceSuppressions !== undefined ? { governanceSuppressions } : {}),
+      ...(architecturePolicy !== undefined ? { architecturePolicy } : {}),
+      ...(policyPack !== undefined ? { policyPack } : {}),
     };
   } catch {
     return DEFAULT_INSPECTOR_CONFIG;

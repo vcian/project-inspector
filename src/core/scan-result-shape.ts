@@ -112,6 +112,8 @@ export function ensureScanShape(raw: ScanResult): ScanResult {
     ...(raw.trustedIssues !== undefined ? { trustedIssues: raw.trustedIssues } : {}),
     ...(raw.productionDecision !== undefined ? { productionDecision: raw.productionDecision } : {}),
     ...(raw.baselineComparison !== undefined ? { baselineComparison: raw.baselineComparison } : {}),
+    ...(raw.baselineHistory !== undefined ? { baselineHistory: raw.baselineHistory } : {}),
+    ...(raw.prCommentScopePaths !== undefined ? { prCommentScopePaths: raw.prCommentScopePaths } : {}),
   };
 }
 

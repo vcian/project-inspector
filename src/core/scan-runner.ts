@@ -12,6 +12,7 @@ import {
   type FileAstAnalysis,
 } from '../engines/ast-engine.js';
 import { runArchitectureEngine } from '../engines/architecture-engine.js';
+import { runArchitecturePolicyEngine } from '../engines/arch-policy-engine.js';
 import { runApiEngine } from '../engines/api-engine.js';
 import { enrichAllIssues } from '../engines/compliance-mapper.js';
 import { runCodeSmellEngine } from '../engines/code-smell-engine.js';
@@ -23,11 +24,13 @@ import { runInventoryEngine } from '../engines/inventory-engine.js';
 import { runLintEngine } from '../engines/lint-engine.js';
 import { runMemoryEngine } from '../engines/memory-engine.js';
 import { runMigrationEngine } from '../engines/migration-engine.js';
+import { runPolyglotEngine } from '../engines/polyglot-engine.js';
 import { runOutdatedEngine } from '../engines/outdated-engine.js';
 import { runPerformanceEngine } from '../engines/performance-engine.js';
 import { runSecurityEngine, type SecurityEngineOptions } from '../engines/security-engine.js';
 import { runSelfCheckEngine } from '../engines/self-check-engine.js';
 import { runTestEngine } from '../engines/test-engine.js';
+import { resolvePrCommentScope } from '../reports/pr-comment.js';
 import { writeScanArtifacts, writeScanReports, writeScanReportsPartial, type ReportSection } from '../reports/writers.js';
 import { runPool } from '../utils/async-pool.js';
 import { discoverSourceFiles } from '../utils/discover-source-files.js';
@@ -38,10 +41,18 @@ import { createSerialQueue } from '../utils/serial-queue.js';
 import { buildDependencySnapshot, snapshotsEqual, type DependencySnapshotV1 } from './dependency-snapshot.js';
 import { buildEnvHashes } from './env-snapshot.js';
 import { sha256File, sha256String } from './file-hash.js';
-import { compareTrustedToBaseline, loadBaselineTrusted, saveBaselineTrusted } from './baseline.js';
+import { tryReadLcovSummary } from './coverage-ingest.js';
+import {
+  compareTrustedToBaseline,
+  loadBaselineHistory,
+  loadBaselineTrusted,
+  saveBaselineTrusted,
+} from './baseline.js';
 import { buildAttackChainNarrative } from './attack-chain.js';
 import { buildProductionDecision } from './decision-engine.js';
+import { collectPluginSuppressPatterns } from '../plugins/manifest-loader.js';
 import { loadInspectorConfig, type InspectorConfig } from './inspector-config.js';
+import { mergePolicyPack } from './policy-packs.js';
 import { applyIssuePipeline } from './issue-pipeline.js';
 import { gatherAllIssues } from './issue-collect.js';
 import { mergeApiRoutes, mergeIssuesByReanalyze } from './issue-merge.js';
@@ -378,7 +389,12 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     const coldStart = skipCache || previousMerged === undefined || interrupted;
 
     const profile: ProjectProfile = await timings.record('profile', () => detectProjectProfile(cwd));
-    const inspectorConfig = await loadInspectorConfig(cwd);
+    const inspectorConfig = await mergePolicyPack(cwd, await loadInspectorConfig(cwd));
+    const pluginSuppress = await collectPluginSuppressPatterns(cwd);
+    const inspectorConfigMerged: InspectorConfig = {
+      ...inspectorConfig,
+      suppressTitleSubstrings: [...inspectorConfig.suppressTitleSubstrings, ...pluginSuppress],
+    };
 
     const hashPairs = await timings.record('file-hashes', () =>
       runPool(normalizedFiles, concurrency, async (file) => [relKey(cwd, file), await sha256File(file)] as const),
@@ -466,16 +482,23 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
           : 'shallow-reuse';
     logger.info({ cacheMode }, 'scan cache mode resolved');
 
+    const prCommentScopePaths = await resolvePrCommentScope(options, cwd);
+
     if (fullReuse) {
       const merged = requireMergedScan(previousMerged, 'fullReuse');
+      const polyglotIssues = await runPolyglotEngine(cwd);
+      const mergedWithPoly: ScanResult = {
+        ...merged,
+        codeSmell: { ...merged.codeSmell, issues: [...merged.codeSmell.issues, ...polyglotIssues] },
+      };
       const finishedAt = new Date().toISOString();
-      const enriched = enrichAllIssues({ ...merged, startedAt, finishedAt, profile });
+      const enriched = enrichAllIssues({ ...mergedWithPoly, startedAt, finishedAt, profile });
       const intel = await extractDatabaseIntelligence(cwd, enriched.inventory.files, enriched.database.ormSignals);
       const enrichedWithDb: ScanResult = { ...enriched, database: { ...enriched.database, intelligence: intel } };
-      const gateThresholds = gateThresholdsFromConfig(inspectorConfig);
+      const gateThresholds = gateThresholdsFromConfig(inspectorConfigMerged);
       const gathered = gatherAllIssues(enrichedWithDb);
       noteRawGatherIssueCount(gathered.length);
-      const piped = applyIssuePipeline(gathered, inspectorConfig, cwd);
+      const piped = applyIssuePipeline(gathered, inspectorConfigMerged, cwd);
       const trusted = deduplicateIssues(piped);
       notePipelineAndDedupedCounts(piped.length, trusted.length);
       const scores = computeScores(trusted, scoreMetaForScan(enrichedWithDb));
@@ -488,6 +511,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
       if (options.saveBaseline === true) {
         await saveBaselineTrusted(outDir, trusted, cwd);
       }
+      const baselineHistory = await loadBaselineHistory(outDir);
       const reused: ScanResult = {
         ...scanForDecision,
         scores,
@@ -496,6 +520,8 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
         trustedIssues: trusted,
         productionDecision,
         ...(baselineComparison !== undefined ? { baselineComparison } : {}),
+        ...(baselineHistory.length > 0 ? { baselineHistory } : {}),
+        ...(prCommentScopePaths !== undefined ? { prCommentScopePaths } : {}),
       };
       await saveScanMeta(outDir, {
         version: 1,
@@ -911,7 +937,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
             ),
           );
 
-    const [dependency, outdated, migration, testsBase, architecture, databaseBase, inventory, lint] =
+    const [dependency, outdated, migration, testsBase, architectureRaw, databaseBase, inventory, lint] =
       await Promise.all([
         dependencyPromise,
         outdatedPromise,
@@ -923,17 +949,31 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
         lintPromise,
       ]);
 
+    const archPolicyIssues = runArchitecturePolicyEngine(cwd, inspectorConfigMerged.architecturePolicy, ast.importGraph);
+    const architecture: ArchitectureScanResult = {
+      ...architectureRaw,
+      issues: [...architectureRaw.issues, ...archPolicyIssues],
+    };
+
     const databaseIntel = await extractDatabaseIntelligence(cwd, inventory.files, databaseBase.ormSignals);
     const database: DatabaseAnalysisResult = { ...databaseBase, intelligence: databaseIntel };
 
     const selfCheck = await runSelfCheckEngine(cwd);
-    const tests =
+    const lcov = await tryReadLcovSummary(cwd);
+    const testsMerged =
       selfCheck.issues.length === 0
         ? testsBase
         : {
             ...testsBase,
             issues: [...testsBase.issues, ...selfCheck.issues],
           };
+    const tests = lcov !== undefined ? { ...testsMerged, lcovSummary: lcov } : testsMerged;
+
+    const polyglotIssues = await runPolyglotEngine(cwd);
+    const codeSmellMerged: CodeSmellScanResult = {
+      ...codeSmell,
+      issues: [...codeSmell.issues, ...polyglotIssues],
+    };
 
     const finishedAt = new Date().toISOString();
     const baseResult: ScanResult = {
@@ -956,7 +996,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
       architecture,
       performance,
       memory,
-      codeSmell,
+      codeSmell: codeSmellMerged,
       migration,
       inventory,
       lint,
@@ -968,10 +1008,10 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     };
 
     const enriched = enrichAllIssues(baseResult);
-    const gateThresholds = gateThresholdsFromConfig(inspectorConfig);
+    const gateThresholds = gateThresholdsFromConfig(inspectorConfigMerged);
     const gathered = gatherAllIssues(enriched);
     noteRawGatherIssueCount(gathered.length);
-    const piped = applyIssuePipeline(gathered, inspectorConfig, cwd);
+    const piped = applyIssuePipeline(gathered, inspectorConfigMerged, cwd);
     const trusted = deduplicateIssues(piped);
     notePipelineAndDedupedCounts(piped.length, trusted.length);
     const scores = computeScores(trusted, scoreMetaForScan(enriched));
@@ -984,6 +1024,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     if (options.saveBaseline === true) {
       await saveBaselineTrusted(outDir, trusted, cwd);
     }
+    const baselineHistory = await loadBaselineHistory(outDir);
     const result: ScanResult = {
       ...scanForDecision,
       scores,
@@ -992,6 +1033,8 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
       trustedIssues: trusted,
       productionDecision,
       ...(baselineComparison !== undefined ? { baselineComparison } : {}),
+      ...(baselineHistory.length > 0 ? { baselineHistory } : {}),
+      ...(prCommentScopePaths !== undefined ? { prCommentScopePaths } : {}),
     };
 
     const redactedResult = redactScanResultForStorage(result);

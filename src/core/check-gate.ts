@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { gatherAllIssues } from './issue-collect.js';
+import { computeSegmentScores } from './scoring-engine.js';
 import type { CheckFailure, CheckResult, Issue, ScanResult } from './types.js';
 
 function getEffectiveIssues(result: ScanResult): Issue[] {
@@ -60,6 +61,31 @@ function evaluateFailures(result: ScanResult): CheckFailure[] {
       reason: `No tests were detected while ${String(result.tests.sourceFileCount)} source files were scanned.`,
       fix: 'Add unit/integration coverage for critical modules and wire tests into CI.',
     });
+  }
+
+  const monorepoHint =
+    result.profile?.topology === 'monorepo' || (result.profile?.projects?.length ?? 0) > 1;
+  if (monorepoHint) {
+    const segments = computeSegmentScores(result.cwd, allIssues, {
+      testFileCount: result.tests.testFileCount,
+      sourceFileCount: result.tests.sourceFileCount,
+    });
+    const nonRoot = segments.filter((s) => s.segment !== 'root');
+    if (nonRoot.length >= 1) {
+      for (const seg of nonRoot) {
+        if (seg.trustedIssueCount < 3) {
+          continue;
+        }
+        if (seg.productionReadiness < minReadiness) {
+          failures.push({
+            file: result.cwd,
+            line: 1,
+            reason: `Folder "${seg.segment}" readiness ${String(seg.productionReadiness)}/100 is below ${String(minReadiness)} (${String(seg.trustedIssueCount)} trusted issues).`,
+            fix: `Triage trusted findings under \`${seg.segment}/\` before merge.`,
+          });
+        }
+      }
+    }
   }
 
   const unique: CheckFailure[] = [];

@@ -1,3 +1,5 @@
+import { relative } from 'node:path';
+
 import type { ApiRouteInfo, Issue, ScoreAxisDiagnostics, ScoreDiagnostics, Scores } from './types.js';
 
 const AXIS_WEIGHTS = {
@@ -253,4 +255,38 @@ export function computeHotspots(issues: readonly Issue[], routes: readonly ApiRo
   return [...issues]
     .sort((a, b) => hotspotScore(b) - hotspotScore(a))
     .slice(0, 10);
+}
+
+/** Per top-level folder (first path segment) readiness — useful for monorepos. */
+export interface SegmentScoreRow {
+  readonly segment: string;
+  readonly productionReadiness: number;
+  readonly security: number;
+  readonly trustedIssueCount: number;
+}
+
+export function computeSegmentScores(
+  cwd: string,
+  trusted: readonly Issue[],
+  meta?: ScoreScanMeta,
+): readonly SegmentScoreRow[] {
+  const bySeg = new Map<string, Issue[]>();
+  for (const issue of trusted) {
+    const r = relative(cwd, issue.file).replaceAll('\\', '/');
+    const segment = r.includes('/') ? (r.split('/')[0] ?? 'root') : 'root';
+    const arr = bySeg.get(segment) ?? [];
+    arr.push(issue);
+    bySeg.set(segment, arr);
+  }
+  const rows: SegmentScoreRow[] = [];
+  for (const [segment, issues] of bySeg) {
+    const s = computeScores(issues, meta);
+    rows.push({
+      segment,
+      productionReadiness: s.productionReadiness,
+      security: s.security,
+      trustedIssueCount: issues.length,
+    });
+  }
+  return rows.sort((a, b) => a.segment.localeCompare(b.segment));
 }

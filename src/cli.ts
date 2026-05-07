@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { Command, Option } from 'commander';
-import { writeFile } from 'node:fs/promises';
+import { appendFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import { exit } from 'node:process';
 import { relative, resolve } from 'node:path';
@@ -15,6 +15,17 @@ import { defaultReportDir, runScan } from './core/scan-runner.js';
 import type { ScanMode, ScanResult } from './core/types.js';
 import { writeSarifReport } from './reports/sarif-writer.js';
 import { logger } from './utils/logger.js';
+
+async function appendGithubStepSummary(result: ScanResult): Promise<void> {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryPath === undefined || summaryPath.length === 0) {
+    return;
+  }
+  const gate =
+    result.productionDecision?.gateOk === true ? 'PASS' : result.productionDecision?.gateOk === false ? 'FAIL' : '—';
+  const line = `**project-inspector** · readiness **${String(result.scores.productionReadiness)}/100** · gate **${gate}** · trusted **${String(result.trustedIssues?.length ?? 0)}**\n`;
+  await appendFile(summaryPath, line, 'utf8');
+}
 
 function formatScanMachineSummary(result: ScanResult): string {
   const verdict = result.productionDecision?.verdict ?? 'UNKNOWN';
@@ -116,6 +127,8 @@ interface SharedScanCliOptions {
   readonly open?: boolean;
   /** Write trusted-issue fingerprint baseline for future delta runs. */
   readonly saveBaseline?: boolean;
+  /** File with one repo-relative path per line to scope `pr-comment.md` (optional). */
+  readonly prScopeFile?: string;
 }
 
 function parseBudget(value: string | undefined): number | undefined {
@@ -148,8 +161,10 @@ async function executeScan(opts: SharedScanCliOptions): Promise<{ result: ScanRe
     ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}),
     ...(opts.skipLint !== undefined ? { skipLint: opts.skipLint } : {}),
     ...(opts.saveBaseline === true ? { saveBaseline: true as const } : {}),
+    ...(opts.prScopeFile !== undefined && opts.prScopeFile.length > 0 ? { prScopeFile: opts.prScopeFile } : {}),
   });
   await emitFormatOutput(result, outDir, opts.format);
+  await appendGithubStepSummary(result);
   return { result, outDir };
 }
 
@@ -179,6 +194,10 @@ program
   .option('--skip-lint', 'skip lint/tsc/prettier checks', false)
   .option('--open', 'open index.html in a browser after scan', false)
   .option('--save-baseline', 'save trusted-issue fingerprint baseline for delta tracking', false)
+  .option(
+    '--pr-scope-file <path>',
+    'file listing repo-relative paths (one per line) to scope pr-comment.md output',
+  )
   .action(async (opts: SharedScanCliOptions) => {
     const { result, outDir } = await executeScan(opts);
     process.stdout.write(
@@ -208,6 +227,10 @@ program
   .option('--budget-ms <n>', 'soft scan budget in milliseconds', (value) => parseBudget(value))
   .option('--skip-lint', 'skip lint/tsc/prettier checks', false)
   .option('--save-baseline', 'save trusted-issue fingerprint baseline for delta tracking', false)
+  .option(
+    '--pr-scope-file <path>',
+    'file listing repo-relative paths (one per line) to scope pr-comment.md output',
+  )
   .action(async (opts: SharedScanCliOptions) => {
     const { result } = await executeScan(opts);
     process.stdout.write(`${formatScanMachineSummary(result)}\n`);

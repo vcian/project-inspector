@@ -1,0 +1,6 @@
+{
+  "id": "soc2",
+  "description": "Baseline hints for SOC2-style change management narratives.",
+  "extraSuppressTitleSubstrings": [],
+  "extraIgnorePathGlobs": []
+}

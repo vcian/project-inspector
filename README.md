@@ -174,7 +174,14 @@ Reports are consolidated:
 | `project-report/security.md` | Security findings, OWASP mapping, hotspots, threat scenarios |
 | `project-report/production-decision.md` | Human-readable production verdict |
 | `project-report/decision.json` | Machine-readable verdict for CI automation |
-| `project-report/scores.json` | Numeric scores (security, performance, quality, compliance, readiness) |
+| `project-report/scores.json` | Numeric scores + segment rollup when present |
+| `project-report/openapi.json` | OpenAPI **3.1** export from detected HTTP routes |
+| `project-report/sbom.cdx.json` | CycloneDX SBOM from npm lockfile |
+| `project-report/osv-summary.json` | OSV vulnerability hints (skipped when offline) |
+| `project-report/pr-comment.md` | GitHub-style Markdown for PR comments / job summaries |
+| `project-report/governance-suppressions.json` | Snapshot of governance suppressions |
+| `project-report/governance-audit.jsonl` | Append-only audit entries per scan |
+| `docs/rules-catalog.md` | Generated rules catalog (`npm run docs:catalog`) |
 | `project-report/inventory.json` | File-level inventory with kind/framework/LOC/bytes |
 | `project-report/results.json` | Present when `--format json` is used |
 | `project-report/results.sarif` | Present when `--format sarif` is used (SARIF 2.1.0) |
@@ -225,6 +232,7 @@ jobs:
 | `--auto-update-db` | cli | Best-effort refresh using `VULN_DB_URL` before dependency scan |
 | `--offline` | cli | Disable remote vuln DB staleness flow and auto-refresh |
 | `VULN_DB_URL` | env | HTTPS URL to override vulnerability rule database |
+| `policyPack` | `project-inspector.config.json` | Named overlay (`packs/<id>.json`) merging extra ignore globs / suppress substrings (HIPAA, SOC2, PCI, OWASP ASVS samples ship under `packs/`) |
 
 ### `VULN_DB_URL` payload shape
 

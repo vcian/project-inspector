@@ -18,7 +18,8 @@
   "files": [
     "dist",
     "plugins",
-    "schemas"
+    "schemas",
+    "packs"
   ],
   "engines": {
     "node": ">=18.0.0"
@@ -30,7 +31,8 @@
     "lint": "eslint src --max-warnings 0",
     "test": "node --import tsx --test src/engines/api-engine.command.test.ts src/reports/writers.exports.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "refresh-majors": "npx tsx scripts/refresh-known-majors.ts"
+    "refresh-majors": "npx tsx scripts/refresh-known-majors.ts",
+    "docs:catalog": "node scripts/gen-rules-catalog.mjs"
   },
   "keywords": [
     "cli",

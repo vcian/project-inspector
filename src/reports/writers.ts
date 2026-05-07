@@ -1,11 +1,22 @@
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, normalize, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { loadBaselineTrusted } from '../core/baseline.js';
+import { loadInspectorConfig } from '../core/inspector-config.js';
 import { evaluateCheckGates } from '../core/check-gate.js';
 import { gatherAllIssues } from '../core/issue-collect.js';
-import { scanReportingMetrics, scanReportingMetricsAreFresh } from '../core/scoring-engine.js';
+import {
+  computeSegmentScores,
+  scanReportingMetrics,
+  scanReportingMetricsAreFresh,
+} from '../core/scoring-engine.js';
 import type { ApiRouteInfo, Issue, ScanResult } from '../core/types.js';
+import { writeOsvSummary } from '../core/osv-summary.js';
+import { buildOpenApi31FromRoutes } from './openapi-export.js';
+import { renderPrCommentMarkdown } from './pr-comment.js';
+import { writeCycloneDxSbom } from './sbom-writer.js';
 import { writeReportIndexHtml } from './html-report.js';
 import { writeSarifReport } from './sarif-writer.js';
 import { loadCodeOwnersRules, ownerForPath, type CodeOwnersRule } from '../utils/codeowners.js';
@@ -88,6 +99,27 @@ function effectiveIssues(result: ScanResult): Issue[] {
 
 function rel(cwd: string, file: string): string {
   return relative(cwd, file).replaceAll('\\', '/');
+}
+
+function segmentRiskSummary(result: ScanResult): Record<string, { readonly CRITICAL: number; readonly HIGH: number; readonly MEDIUM: number; readonly LOW: number }> {
+  const trusted = effectiveIssues(result);
+  const map = new Map<string, { CRITICAL: number; HIGH: number; MEDIUM: number; LOW: number }>();
+  for (const issue of trusted) {
+    const parts = rel(result.cwd, issue.file).split('/');
+    const seg = parts.length > 1 ? parts[0] ?? 'root' : 'root';
+    const row = map.get(seg) ?? { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
+    if (issue.severity === 'CRITICAL') {
+      row.CRITICAL += 1;
+    } else if (issue.severity === 'HIGH') {
+      row.HIGH += 1;
+    } else if (issue.severity === 'MEDIUM') {
+      row.MEDIUM += 1;
+    } else {
+      row.LOW += 1;
+    }
+    map.set(seg, row);
+  }
+  return Object.fromEntries(map);
 }
 
 function severityWeight(severity: Issue['severity']): number {
@@ -311,6 +343,13 @@ function buildProductionDecisionDoc(result: ScanResult): string {
     (t) =>
       `### \`TOP-${String(t.rank)}\` — **${t.severity}** — ${t.title}\n\n| Field | Value |\n| --- | --- |\n| **Where** | \`${t.relFile}:${String(t.line)}\` |\n| **Engine** | \`${t.engine}\` |\n| **Attack chain** | ${t.attackChain.replaceAll('|', '\\|')} |\n| **Root cause** | ${t.rootCause.replaceAll('|', '\\|')} |\n| **Fix** | ${t.fix.replaceAll('|', '\\|')} |\n| **Verify** | ${t.verify.replaceAll('|', '\\|')} |\n`,
   );
+  const trustedAll = effectiveIssues(result);
+  const confHigh = trustedAll.filter((i) => i.confidence === 'high').length;
+  const confMed = trustedAll.filter((i) => i.confidence === 'medium').length;
+  const confLow = trustedAll.filter((i) => i.confidence === 'low' || i.confidence === undefined).length;
+  const confTotal = trustedAll.length;
+  const pct = (n: number): string =>
+    confTotal > 0 ? `${String(Math.round((n / confTotal) * 1000) / 10)}%` : '—';
   return finalizeReport(
     result,
     [
@@ -324,6 +363,14 @@ function buildProductionDecisionDoc(result: ScanResult): string {
     `### **${d.verdict.replaceAll('_', ' ')}**`,
     '',
     d.confidenceNote,
+    '',
+    '### Confidence breakdown (trusted findings)',
+    '',
+    '| Band | Count | Share |',
+    '| --- | ---: | ---: |',
+    `| High | ${String(confHigh)} | ${pct(confHigh)} |`,
+    `| Medium | ${String(confMed)} | ${pct(confMed)} |`,
+    `| Low / unset | ${String(confLow)} | ${pct(confLow)} |`,
     '',
     '_The same structured payload is written to `decision.json` next to this file for CI (`jq .verdict decision.json`) and automation._',
     '',
@@ -409,12 +456,69 @@ function buildSummary(result: ScanResult): string {
       : `**${badge(result.scores.productionReadiness)}** (legacy badge)`;
   const fw = result.profile?.primaryFramework ?? 'unknown';
   const topo = result.profile?.topology ?? 'single';
+  const metaSeg = {
+    testFileCount: result.tests.testFileCount,
+    sourceFileCount: result.tests.sourceFileCount,
+  };
+  const segmentScores = computeSegmentScores(result.cwd, trusted, metaSeg);
+  const segRisk = segmentRiskSummary(result);
+  const whatChangedSinceScan =
+    result.baselineComparison !== undefined
+      ? [
+          '## What changed since last scan',
+          '',
+          `New **${String(result.baselineComparison.newCount)}** · resolved **${String(result.baselineComparison.resolvedCount)}** · unchanged **${String(result.baselineComparison.unchangedCount)}**${result.productionDecision !== undefined ? ` · verdict **${result.productionDecision.verdict}**` : ''}.`,
+          '',
+        ]
+      : [];
+  const baselineHistSection =
+    result.baselineHistory !== undefined && result.baselineHistory.length > 0
+      ? [
+          '## Recent baseline snapshots',
+          '',
+          '| Saved at | Fingerprints | New vs previous |',
+          '| --- | --- | ---: |',
+          ...[...result.baselineHistory].slice(-12).map((h) => {
+            const delta = h.newVsPrevious !== undefined ? String(h.newVsPrevious) : '—';
+            return `| ${h.savedAt} | ${String(h.fingerprintCount)} | ${delta} |`;
+          }),
+          '',
+        ]
+      : [];
+  const segFolderSection =
+    Object.keys(segRisk).length > 0
+      ? [
+          '## Trusted findings by top-level folder',
+          '',
+          '| Folder | CRITICAL | HIGH | MEDIUM | LOW |',
+          '| --- | ---: | ---: | ---: | ---: |',
+          ...Object.entries(segRisk)
+            .sort((a, b) => a[0].localeCompare(b[0]))
+            .map(([k, v]) => `| \`${k.replaceAll('|', '\\|')}\` | ${String(v.CRITICAL)} | ${String(v.HIGH)} | ${String(v.MEDIUM)} | ${String(v.LOW)} |`),
+          '',
+        ]
+      : [];
+  const segScoreSection =
+    segmentScores.filter((s) => s.segment !== 'root').length > 0
+      ? [
+          '## Per-folder readiness (monorepo)',
+          '',
+          '| Folder | Readiness | Security | Trusted issues |',
+          '| --- | ---: | ---: | ---: |',
+          ...segmentScores.map(
+            (s) =>
+              `| \`${s.segment.replaceAll('|', '\\|')}\` | ${String(s.productionReadiness)} | ${String(s.security)} | ${String(s.trustedIssueCount)} |`,
+          ),
+          '',
+        ]
+      : [];
   const lines = [
     reportDocumentHeader(
       result,
       'Project summary & readiness',
       '_Executive overview: production verdict, scores, signal vs noise, and where to read next._',
     ),
+    ...whatChangedSinceScan,
     '## Scan context (heuristic)',
     '',
     `- **Framework (primary):** ${fw} — tune expectations if this is wrong for a library or monorepo leaf package.`,
@@ -473,6 +577,9 @@ function buildSummary(result: ScanResult): string {
           '',
         ]
       : []),
+    ...baselineHistSection,
+    ...segFolderSection,
+    ...segScoreSection,
     '## Top 5 hotspots (cross-engine)',
     '',
     ...hotspotLines,
@@ -504,9 +611,14 @@ function buildSummary(result: ScanResult): string {
     '- `test.md` — test heuristics',
     '- `decision.json` — **machine-readable** verdict (same facts as production-decision) for CI scripts, dashboards, and `jq` — not a duplicate human doc',
     '- `schemas/decision.schema.json` — JSON Schema (draft 2020-12) for validating `decision.json`',
-    '- `scores.json` — numeric axes + score diagnostics for dashboards',
+    '- `scores.json` — numeric axes + score diagnostics + segment summary for dashboards',
     '- `index.html` — static **report hub** (open locally; links to Markdown + JSON + SARIF)',
     '- `results.sarif` — SARIF 2.1.0 (trusted findings; written every scan for CI uploads)',
+    '- `sbom.cdx.json` — CycloneDX SBOM (from npm lockfile)',
+    '- `openapi.json` — OpenAPI **3.1** export from detected routes',
+    '- `osv-summary.json` — OSV vulnerability hints (skipped in offline mode)',
+    '- `pr-comment.md` — scoped Markdown for PR comments / job summaries',
+    '- `governance-suppressions.json` — snapshot of active governance suppressions',
     '',
   ];
   return finalizeReport(result, lines.join('\n'));
@@ -601,6 +713,37 @@ function dependencyKind(issue: Issue): string {
   return 'outdated';
 }
 
+function tryLicenseSampleLines(cwd: string): string[] {
+  try {
+    const raw = readFileSync(join(cwd, 'package-lock.json'), 'utf8');
+    const lock = JSON.parse(raw) as { packages?: Record<string, { license?: string }> };
+    const rows: { name: string; license: string }[] = [];
+    for (const [pathKey, meta] of Object.entries(lock.packages ?? {})) {
+      if (pathKey === '' || meta.license === undefined) {
+        continue;
+      }
+      const tail = pathKey.includes('node_modules/') ? pathKey.split('node_modules/').pop() ?? pathKey : pathKey;
+      rows.push({ name: tail, license: meta.license });
+    }
+    const cap = rows.slice(0, 35);
+    if (cap.length === 0) {
+      return [];
+    }
+    return [
+      '## License sample (from lockfile)',
+      '',
+      '| Package | License |',
+      '| --- | --- |',
+      ...cap.map((r) => `| \`${r.name.replaceAll('|', '\\|')}\` | ${r.license.replaceAll('|', '\\|')} |`),
+      '',
+      '_Policies like GPL may affect distribution — validate with legal for enterprise use._',
+      '',
+    ];
+  } catch {
+    return [];
+  }
+}
+
 function buildDependencies(result: ScanResult): string {
   const issues = [...result.dependency.issues, ...result.outdated.issues];
   const lines = [
@@ -615,6 +758,7 @@ function buildDependencies(result: ScanResult): string {
     `- Workspace manifests: ${String(result.dependency.projectManifestCount ?? 1)}`,
     `- Direct dependency declarations: ${String(result.dependency.directDependencyCount)}`,
     '',
+    ...tryLicenseSampleLines(result.cwd),
   ];
   if (result.dependency.auditSummary !== undefined) {
     lines.push(
@@ -1504,18 +1648,22 @@ function buildAst(result: ScanResult): string {
     '',
     `## Top ${String(rows.length === 0 ? 0 : rows.length)} most complex functions`,
     '',
-    '| File | Function | Complexity | Max Nesting | Lines |',
-    '| --- | --- | ---: | ---: | ---: |',
+    '| File | Function | Complexity | Cognitive≈ | Max Nesting | Lines |',
+    '| --- | --- | ---: | ---: | ---: | ---: |',
   ];
   for (const fn of rows) {
+    const cognitive = fn.complexity + fn.maxNesting * 2;
     lines.push(
-      `| \`${rel(result.cwd, fn.file)}:${String(fn.line)}\` | ${fn.name} | ${String(fn.complexity)} | ${String(fn.maxNesting)} | ${String(fn.lineCount)} |`,
+      `| \`${rel(result.cwd, fn.file)}:${String(fn.line)}\` | ${fn.name} | ${String(fn.complexity)} | ${String(cognitive)} | ${String(fn.maxNesting)} | ${String(fn.lineCount)} |`,
     );
   }
   if (rows.length === 0) {
-    lines.push('| _none_ | _none_ | 0 | 0 | 0 |');
+    lines.push('| _none_ | _none_ | 0 | 0 | 0 | 0 |');
   }
-  lines.push('');
+  lines.push(
+    '_**Cognitive≈** is `complexity + 2 × maxNesting` (proxy until native cognitive metrics ship). Git churn weighting can be layered externally via `git log --follow` on hot files._',
+    '',
+  );
   return finalizeReport(result, lines.join('\n'));
 }
 
@@ -1549,6 +1697,21 @@ function buildTest(result: ScanResult): string {
     `| Source files | ${String(result.tests.sourceFileCount)} |`,
     `| Test ratio | ${String(result.tests.ratioApprox)} |`,
     '',
+    ...(result.tests.lcovSummary !== undefined
+      ? [
+          '## Line coverage (LCOV)',
+          '',
+          '_Ingested from `coverage/lcov.info` or `coverage/lcov.dat` when present after a test run._',
+          '',
+          '| Metric | Value |',
+          '| --- | ---: |',
+          `| Lines found | ${String(result.tests.lcovSummary.linesFound)} |`,
+          `| Lines hit | ${String(result.tests.lcovSummary.linesHit)} |`,
+          `| Approx. line % | ${String(result.tests.lcovSummary.percentApprox)}% |`,
+          `| Files in LCOV | ${String(result.tests.lcovSummary.filesWithCoverage)} |`,
+          '',
+        ]
+      : []),
     '## Missing Test Targets',
     '',
     ...(missing.length === 0 ? ['_No obvious missing entry-point tests detected._'] : missing.map((file) => `- \`${file}\``)),
@@ -1591,6 +1754,16 @@ function buildActionPlan(result: ScanResult, owners: readonly CodeOwnersRule[]):
     '',
     '- Status flow: `Needs triage` -> `Planned` -> `In progress` -> `Done`.',
     '- If a finding is intentional (e.g. public route), suppress with owner + reason in `project-inspector.config.json`.',
+    '',
+    '## Copy-paste PR template',
+    '',
+    '```markdown',
+    '## Inspector follow-up',
+    '',
+    '- [ ] Linked issue IDs from action-plan',
+    '- [ ] Re-ran `project-inspector check` locally',
+    '- [ ] Updated baseline if suppressions added (`--save-baseline`)',
+    '```',
     '',
   );
   return finalizeReport(result, lines.join('\n'));
@@ -1698,6 +1871,11 @@ export async function writeScanReports(result: ScanResult, outDir: string): Prom
 export async function writeScanArtifacts(result: ScanResult, outDir: string): Promise<void> {
   await mkdir(outDir, { recursive: true });
   const owners = await loadCodeOwnersRules(result.cwd);
+  const trusted = effectiveIssues(result);
+  const metaSeg = {
+    testFileCount: result.tests.testFileCount,
+    sourceFileCount: result.tests.sourceFileCount,
+  };
   if (result.productionDecision !== undefined) {
     await writeFile(
       join(outDir, 'decision.json'),
@@ -1719,6 +1897,9 @@ export async function writeScanArtifacts(result: ScanResult, outDir: string): Pr
         scanMode: result.mode,
         online: result.online,
         scoreDiagnostics: result.scoreDiagnostics,
+        segmentRisk: segmentRiskSummary(result),
+        segmentScores: computeSegmentScores(result.cwd, trusted, metaSeg),
+        baselineHistory: result.baselineHistory ?? [],
       },
       null,
       2,
@@ -1729,6 +1910,55 @@ export async function writeScanArtifacts(result: ScanResult, outDir: string): Pr
   await copyDecisionSchemaToReport(outDir);
   await writeMarkdownFile(outDir, 'action-plan.md', buildActionPlan(result, owners));
   await writeMarkdownFile(outDir, 'for-users.md', buildForUsers(result));
+  const baselineForPr = await loadBaselineTrusted(outDir);
+  const baselineFp =
+    baselineForPr !== undefined ? new Set<string>(baselineForPr.fingerprints) : undefined;
+  const scopeSet =
+    result.prCommentScopePaths !== undefined && result.prCommentScopePaths.length > 0
+      ? new Set(result.prCommentScopePaths)
+      : undefined;
+  await writeMarkdownFile(
+    outDir,
+    'pr-comment.md',
+    renderPrCommentMarkdown(result, {
+      ...(baselineFp !== undefined ? { baselineFingerprints: baselineFp } : {}),
+      ...(scopeSet !== undefined ? { scopeRelPaths: scopeSet } : {}),
+    }),
+  );
+
+  await writeCycloneDxSbom(result.cwd, join(outDir, 'sbom.cdx.json')).catch(() => false);
+  try {
+    const openapiDoc = buildOpenApi31FromRoutes(result.api.routes, 'Detected HTTP routes', '1.0.0');
+    await writeFile(join(outDir, 'openapi.json'), `${JSON.stringify(openapiDoc, null, 2)}\n`, 'utf8');
+  } catch {
+    /* optional */
+  }
+  await writeOsvSummary(result.cwd, outDir, !result.online);
+  try {
+    const cfg = await loadInspectorConfig(result.cwd);
+    await writeFile(
+      join(outDir, 'governance-suppressions.json'),
+      `${JSON.stringify(
+        { version: 1, suppressions: cfg.governanceSuppressions ?? [], exportedAt: result.finishedAt },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+    await appendFile(
+      join(outDir, 'governance-audit.jsonl'),
+      `${JSON.stringify({
+        ts: result.finishedAt,
+        suppressionsActive: (cfg.governanceSuppressions ?? []).length,
+        scanMode: result.mode,
+        readiness: result.scores.productionReadiness,
+      })}\n`,
+      'utf8',
+    );
+  } catch {
+    /* optional */
+  }
+
   await writeReportIndexHtml(result, outDir);
 }
 
