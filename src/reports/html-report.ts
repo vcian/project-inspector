@@ -268,8 +268,7 @@ export async function writeReportIndexHtml(result: ScanResult, outDir: string): 
     <li><a href="results.sarif">results.sarif</a></li>
     <li><a href="openapi.json">openapi.json</a></li>
     <li><a href="sbom.cdx.json">sbom.cdx.json</a></li>
-    <li><a href="osv-summary.json">osv-summary.json</a></li>
-    <li><a href="pr-comment.md">pr-comment.md</a></li>
+    <li><a href="audit-summary.md">audit-summary.md</a></li>
     <li><a href="governance-suppressions.json">governance-suppressions.json</a></li>
   </ul>
   <p class="note">Open via <code>file://</code>. CI example: <code>examples/github-actions-project-inspector.yml</code> in the package repo.</p>

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { Command, Option } from 'commander';
 import { appendFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import { exit } from 'node:process';
 import { relative, resolve } from 'node:path';
+import chalk from 'chalk';
 
 import { runChatCommand } from './commands/chat.js';
 import { runUpdateVulnDbCommand } from './commands/update-vuln-db.js';
@@ -15,6 +17,9 @@ import { defaultReportDir, runScan } from './core/scan-runner.js';
 import type { ScanMode, ScanResult } from './core/types.js';
 import { writeSarifReport } from './reports/sarif-writer.js';
 import { logger } from './utils/logger.js';
+
+const _require = createRequire(import.meta.url);
+const pkgVersion = (_require('../package.json') as { version: string }).version;
 
 async function appendGithubStepSummary(result: ScanResult): Promise<void> {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
@@ -27,7 +32,12 @@ async function appendGithubStepSummary(result: ScanResult): Promise<void> {
   await appendFile(summaryPath, line, 'utf8');
 }
 
-function formatScanMachineSummary(result: ScanResult): string {
+/**
+ * Renders a Unicode box summary with chalk colors.
+ * READY/PASS = green, BLOCKED/FAIL = red, medium scores = yellow.
+ * Replaces the old PI_VERDICT=... machine-readable line.
+ */
+function formatScanBoxSummary(result: ScanResult): string {
   const verdict = result.productionDecision?.verdict ?? 'UNKNOWN';
   const gate =
     result.productionDecision?.gateOk === true
@@ -35,7 +45,46 @@ function formatScanMachineSummary(result: ScanResult): string {
       : result.productionDecision?.gateOk === false
         ? 'FAIL'
         : 'UNKNOWN';
-  return `PI_VERDICT=${verdict} PI_READINESS=${String(result.scores.productionReadiness)} PI_SECURITY=${String(result.scores.security)} PI_GATE=${gate} PI_TRUSTED=${String(result.trustedIssues?.length ?? 0)}`;
+  const readiness = result.scores.productionReadiness;
+  const security = result.scores.security;
+  const trusted = result.trustedIssues?.length ?? 0;
+
+  // Colorise values — escape codes don't affect the raw length we track separately.
+  const verdictColored =
+    verdict === 'READY' ? chalk.green.bold(verdict) : chalk.red.bold(verdict);
+  const gateColored = gate === 'PASS' ? chalk.green(gate) : chalk.red(gate);
+  const readinessColored =
+    readiness >= 70
+      ? chalk.green(`${String(readiness)}/100`)
+      : readiness >= 50
+        ? chalk.yellow(`${String(readiness)}/100`)
+        : chalk.red(`${String(readiness)}/100`);
+  const securityColored =
+    security >= 70
+      ? chalk.green(`${String(security)}/100`)
+      : security >= 50
+        ? chalk.yellow(`${String(security)}/100`)
+        : chalk.red(`${String(security)}/100`);
+
+  const W = 42; // inner width (between │ chars)
+  const hr = '─'.repeat(W);
+
+  // Build a padded row; rawLen = visible length of the value string (no escape codes).
+  function row(label: string, colored: string, rawLen: number): string {
+    const prefix = `  ${label.padEnd(13)}`;
+    const pad = Math.max(0, W - prefix.length - rawLen);
+    return `│${prefix}${colored}${' '.repeat(pad)}│`;
+  }
+
+  return [
+    `┌${hr}┐`,
+    row('Verdict', verdictColored, verdict.length),
+    row('Readiness', readinessColored, `${String(readiness)}/100`.length),
+    row('Security', securityColored, `${String(security)}/100`.length),
+    row('Trusted', `${String(trusted)} issues`, `${String(trusted)} issues`.length),
+    row('Gate', gateColored, gate.length),
+    `└${hr}┘`,
+  ].join('\n');
 }
 
 function openReportPreview(outDir: string): void {
@@ -97,14 +146,26 @@ function formatOption(): Option {
   return new Option('--format <format>', 'extra output format').choices(['md', 'json', 'sarif']).default('md');
 }
 
-async function emitFormatOutput(result: ScanResult, outDir: string, format: OutputFormat): Promise<void> {
-  if (format === 'sarif') {
-    await writeSarifReport(result, outDir);
-    return;
-  }
-  if (format === 'json') {
-    await writeFile(resolve(outDir, 'results.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
-  }
+/**
+ * Attaches all options shared by scan / check / watch to the given command.
+ * Each command may add its own extras after calling this.
+ */
+function addSharedScanOptions(cmd: Command): Command {
+  return cmd
+    .option('--project <path>', 'project root path')
+    .option('-c, --cwd <path>', 'alias for --project')
+    .option('-o, --out <dir>', 'output directory')
+    .addOption(scanModeOption())
+    .addOption(formatOption())
+    .option('--concurrency <n>', 'scan concurrency', (value) => parseConcurrency(value), defaultConcurrency())
+    .option('--online', 'allow online dependency audit', false)
+    .option('--auto-update-db', 'silently refresh local vulnerability DB before dependency scan', false)
+    .option('--no-cache', 'disable cache reuse', false)
+    .option('--rescan', 'full workspace scan: ignore caches and git incremental scope', false)
+    .option('--incremental', 'analyze only changed files where supported', false)
+    .option('--offline', 'disable vuln DB staleness checks and online refresh', false)
+    .option('--budget-ms <n>', 'soft scan budget in milliseconds', (value) => parseBudget(value))
+    .option('--skip-lint', 'skip lint/tsc/prettier checks', false);
 }
 
 interface SharedScanCliOptions {
@@ -127,7 +188,7 @@ interface SharedScanCliOptions {
   readonly open?: boolean;
   /** Write trusted-issue fingerprint baseline for future delta runs. */
   readonly saveBaseline?: boolean;
-  /** File with one repo-relative path per line to scope `pr-comment.md` (optional). */
+  /** File with one repo-relative path per line to scope `audit-summary.md` (optional). */
   readonly prScopeFile?: string;
 }
 
@@ -141,6 +202,16 @@ function parseBudget(value: string | undefined): number | undefined {
     exit(1);
   }
   return Math.floor(numeric);
+}
+
+async function emitFormatOutput(result: ScanResult, outDir: string, format: OutputFormat): Promise<void> {
+  if (format === 'sarif') {
+    await writeSarifReport(result, outDir);
+    return;
+  }
+  if (format === 'json') {
+    await writeFile(resolve(outDir, 'results.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+  }
 }
 
 async function executeScan(opts: SharedScanCliOptions): Promise<{ result: ScanResult; outDir: string }> {
@@ -173,75 +244,49 @@ const program = new Command();
 program
   .name('project-inspector')
   .description('Offline-first static analysis CLI')
-  .version('0.3.0');
+  .version(pkgVersion);
 
-program
-  .command('scan')
-  .description('Run the scanner and write project-report/')
-  .option('--project <path>', 'project root path')
-  .option('-c, --cwd <path>', 'alias for --project')
-  .option('-o, --out <dir>', 'output directory')
-  .addOption(scanModeOption())
-  .addOption(formatOption())
-  .option('--concurrency <n>', 'scan concurrency', (value) => parseConcurrency(value), defaultConcurrency())
-  .option('--online', 'allow online dependency audit', false)
-  .option('--auto-update-db', 'silently refresh local vulnerability DB before dependency scan', false)
-  .option('--no-cache', 'disable cache reuse', false)
-  .option('--rescan', 'full workspace scan: ignore caches and git incremental scope', false)
-  .option('--incremental', 'analyze only changed files where supported', false)
-  .option('--offline', 'disable vuln DB staleness checks and online refresh', false)
-  .option('--budget-ms <n>', 'soft scan budget in milliseconds', (value) => parseBudget(value))
-  .option('--skip-lint', 'skip lint/tsc/prettier checks', false)
+addSharedScanOptions(
+  program
+    .command('scan')
+    .description('Run the scanner and write project-report/'),
+)
   .option('--open', 'open index.html in a browser after scan', false)
   .option('--save-baseline', 'save trusted-issue fingerprint baseline for delta tracking', false)
   .option(
     '--pr-scope-file <path>',
-    'file listing repo-relative paths (one per line) to scope pr-comment.md output',
+    'file listing repo-relative paths (one per line) to scope audit-summary.md output',
   )
   .action(async (opts: SharedScanCliOptions) => {
     const { result, outDir } = await executeScan(opts);
-    process.stdout.write(
-      `Scan complete. Readiness ${String(result.scores.productionReadiness)}/100. Reports written to ${outDir}\n`,
-    );
-    process.stdout.write(`${formatScanMachineSummary(result)}\n`);
+    process.stdout.write(`\n${formatScanBoxSummary(result)}\n`);
+    process.stdout.write(`\nReport: ${resolve(outDir, 'index.html')}\n`);
     if (opts.open === true) {
       openReportPreview(outDir);
     }
   });
 
-program
-  .command('check')
-  .description('Run the scan and fail on blocking conditions')
-  .option('--project <path>', 'project root path')
-  .option('-c, --cwd <path>', 'alias for --project')
-  .option('-o, --out <dir>', 'output directory')
-  .addOption(scanModeOption())
-  .addOption(formatOption())
-  .option('--concurrency <n>', 'scan concurrency', (value) => parseConcurrency(value), defaultConcurrency())
-  .option('--online', 'allow online dependency audit', false)
-  .option('--auto-update-db', 'silently refresh local vulnerability DB before dependency scan', false)
-  .option('--no-cache', 'disable cache reuse', false)
-  .option('--rescan', 'full workspace scan: ignore caches and git incremental scope', false)
-  .option('--incremental', 'analyze only changed files where supported', false)
-  .option('--offline', 'disable vuln DB staleness checks and online refresh', false)
-  .option('--budget-ms <n>', 'soft scan budget in milliseconds', (value) => parseBudget(value))
-  .option('--skip-lint', 'skip lint/tsc/prettier checks', false)
+addSharedScanOptions(
+  program
+    .command('check')
+    .description('Run the scan and fail on blocking conditions'),
+)
   .option('--save-baseline', 'save trusted-issue fingerprint baseline for delta tracking', false)
   .option(
     '--pr-scope-file <path>',
-    'file listing repo-relative paths (one per line) to scope pr-comment.md output',
+    'file listing repo-relative paths (one per line) to scope audit-summary.md output',
   )
   .action(async (opts: SharedScanCliOptions) => {
-    const { result } = await executeScan(opts);
-    process.stdout.write(`${formatScanMachineSummary(result)}\n`);
+    const { result, outDir } = await executeScan(opts);
+    process.stdout.write(`\n${formatScanBoxSummary(result)}\n`);
+    process.stdout.write(`\nReport: ${resolve(outDir, 'index.html')}\n`);
     const gate = runCheckGate(result);
     if (gate.passed) {
-      process.stdout.write(`Check passed. Readiness ${String(result.scores.productionReadiness)}/100.\n`);
       exit(0);
     }
-    process.stderr.write('Check failed:\n');
+    process.stderr.write('\nCheck failed:\n');
     for (const failure of gate.failures) {
-      process.stderr.write(`- ${failure.reason} (${failure.file}:${String(failure.line)})\n`);
+      process.stderr.write(`  ${chalk.red('✖')} ${failure.reason} (${failure.file}:${String(failure.line)})\n`);
     }
     exit(1);
   });
@@ -269,43 +314,30 @@ program
     process.stdout.write(`Removed ${outDir}\n`);
   });
 
-program
-  .command('watch')
-  .description('Watch source files and re-run scan')
-  .option('--project <path>', 'project root path')
-  .option('-c, --cwd <path>', 'alias for --project')
-  .option('-o, --out <dir>', 'output directory')
-  .addOption(scanModeOption())
-  .addOption(formatOption())
-  .option('--concurrency <n>', 'scan concurrency', (value) => parseConcurrency(value), defaultConcurrency())
-  .option('--online', 'allow online dependency audit', false)
-  .option('--auto-update-db', 'silently refresh local vulnerability DB before dependency scan', false)
-  .option('--no-cache', 'disable cache reuse', false)
-  .option('--rescan', 'full workspace scan: ignore caches and git incremental scope', false)
-  .option('--incremental', 'analyze only changed files where supported', false)
-  .option('--offline', 'disable vuln DB staleness checks and online refresh', false)
-  .option('--budget-ms <n>', 'soft scan budget in milliseconds', (value) => parseBudget(value))
-  .option('--skip-lint', 'skip lint/tsc/prettier checks', false)
-  .action(async (opts: SharedScanCliOptions) => {
-    const projectDir = resolveProjectPath(opts.project, opts.cwd);
-    const outDir = resolve(opts.out ?? defaultReportDir(projectDir));
-    assertSafeOutDir(projectDir, outDir);
-    await runWatchCommand({
-      cwd: projectDir,
-      outDir,
-      concurrency: opts.concurrency,
-      mode: opts.mode,
-      online: opts.online ?? false,
-      incremental: opts.rescan === true ? false : (opts.incremental ?? false),
-      useFileCache: opts.rescan === true ? false : opts.noCache !== true,
-      rescan: opts.rescan === true,
-      ...(opts.offline !== undefined ? { offline: opts.offline } : {}),
-      ...(opts.autoUpdateDb !== undefined ? { autoUpdateDb: opts.autoUpdateDb } : {}),
-      outputFormat: opts.format,
-      ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}),
-      ...(opts.skipLint !== undefined ? { skipLint: opts.skipLint } : {}),
-    });
+addSharedScanOptions(
+  program
+    .command('watch')
+    .description('Watch source files and re-run scan'),
+).action(async (opts: SharedScanCliOptions) => {
+  const projectDir = resolveProjectPath(opts.project, opts.cwd);
+  const outDir = resolve(opts.out ?? defaultReportDir(projectDir));
+  assertSafeOutDir(projectDir, outDir);
+  await runWatchCommand({
+    cwd: projectDir,
+    outDir,
+    concurrency: opts.concurrency,
+    mode: opts.mode,
+    online: opts.online ?? false,
+    incremental: opts.rescan === true ? false : (opts.incremental ?? false),
+    useFileCache: opts.rescan === true ? false : opts.noCache !== true,
+    rescan: opts.rescan === true,
+    ...(opts.offline !== undefined ? { offline: opts.offline } : {}),
+    ...(opts.autoUpdateDb !== undefined ? { autoUpdateDb: opts.autoUpdateDb } : {}),
+    outputFormat: opts.format,
+    ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}),
+    ...(opts.skipLint !== undefined ? { skipLint: opts.skipLint } : {}),
   });
+});
 
 program
   .command('update-vuln-db')

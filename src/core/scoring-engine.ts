@@ -17,29 +17,35 @@ export interface ScanReportingMetrics {
   dedupedCount: number;
 }
 
-export const scanReportingMetrics: ScanReportingMetrics = {
-  rawGatherCount: 0,
-  pipelineOutCount: 0,
-  dedupedCount: 0,
-};
+/** Factory — creates a fresh metrics object for each scan (avoids singleton mutation races). */
+export function createScanMetrics(): ScanReportingMetrics {
+  return { rawGatherCount: 0, pipelineOutCount: 0, dedupedCount: 0 };
+}
 
-/** True after `resetScanReportingMetrics()` for the current scan (even when counts are zero). */
+/** Module-level singleton kept for writer backward-compat; updated from local metrics before write. */
+export const scanReportingMetrics: ScanReportingMetrics = createScanMetrics();
+
+/** True after `activateScanMetrics()` for the current scan (even when counts are zero). */
 let scanReportingMetricsActive = false;
 
-export function resetScanReportingMetrics(): void {
-  scanReportingMetrics.rawGatherCount = 0;
-  scanReportingMetrics.pipelineOutCount = 0;
-  scanReportingMetrics.dedupedCount = 0;
+/** Copy a local metrics snapshot into the module-level singleton before calling writers. */
+export function activateScanMetrics(m: ScanReportingMetrics): void {
+  scanReportingMetrics.rawGatherCount = m.rawGatherCount;
+  scanReportingMetrics.pipelineOutCount = m.pipelineOutCount;
+  scanReportingMetrics.dedupedCount = m.dedupedCount;
   scanReportingMetricsActive = true;
 }
 
-export function noteRawGatherIssueCount(count: number): void {
-  scanReportingMetrics.rawGatherCount = count;
+
+export function noteRawGatherIssueCount(count: number, metrics?: ScanReportingMetrics): void {
+  const target = metrics ?? scanReportingMetrics;
+  target.rawGatherCount = count;
 }
 
-export function notePipelineAndDedupedCounts(piped: number, deduped: number): void {
-  scanReportingMetrics.pipelineOutCount = piped;
-  scanReportingMetrics.dedupedCount = deduped;
+export function notePipelineAndDedupedCounts(piped: number, deduped: number, metrics?: ScanReportingMetrics): void {
+  const target = metrics ?? scanReportingMetrics;
+  target.pipelineOutCount = piped;
+  target.dedupedCount = deduped;
 }
 
 export function scanReportingMetricsAreFresh(): boolean {
@@ -81,14 +87,15 @@ function deductOtherAxis(score: number, issue: Issue): number {
 }
 
 /**
- * Collapse repeated findings (same engine + rule key + title) across files/lines.
+ * Collapse repeated findings (same engine + rule) across files/lines.
+ * Uses issue.title as a stable rule identifier (not code snippets, which vary per file).
  * Representative keeps first occurrence; description notes volume.
  */
 export function deduplicateIssues(issues: readonly Issue[]): Issue[] {
   const groups = new Map<string, Issue[]>();
   for (const issue of issues) {
-    const ruleKey = issue.code ?? '_';
-    const key = `${issue.engine}::${ruleKey}::${issue.title}`;
+    const ruleId = issue.title.slice(0, 60);
+    const key = `${issue.engine}::${ruleId}`;
     const list = groups.get(key);
     if (list === undefined) {
       groups.set(key, [issue]);
@@ -251,9 +258,25 @@ export function computeScores(issues: readonly Issue[], meta?: ScoreScanMeta): S
 }
 
 export function computeHotspots(issues: readonly Issue[], routes: readonly ApiRouteInfo[]): Issue[] {
-  void routes;
+  // Routes with no auth on high-severity security findings score +2 (likely exploitable endpoints).
+  const unprotectedPaths = new Set(
+    routes.filter((r) => r.authHeuristic === 'likely-open').map((r) => r.pathPattern),
+  );
+
+  function adjustedScore(issue: Issue): number {
+    const base = hotspotScore(issue);
+    if (
+      unprotectedPaths.size > 0 &&
+      (issue.severity === 'HIGH' || issue.severity === 'CRITICAL') &&
+      issue.engine === 'security'
+    ) {
+      return base + 2;
+    }
+    return base;
+  }
+
   return [...issues]
-    .sort((a, b) => hotspotScore(b) - hotspotScore(a))
+    .sort((a, b) => adjustedScore(b) - adjustedScore(a))
     .slice(0, 10);
 }
 

@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, normalize, resolve } from 'node:path';
 import { JsxEmit, ScriptTarget } from 'typescript';
@@ -37,9 +37,10 @@ import { discoverSourceFiles } from '../utils/discover-source-files.js';
 import { detectProjectProfile } from '../utils/detect-project.js';
 import { getGitChangedPaths } from '../utils/git-incremental.js';
 import { logger } from '../utils/logger.js';
+import { ScanProgress } from '../utils/progress.js';
 import { createSerialQueue } from '../utils/serial-queue.js';
 import { buildDependencySnapshot, snapshotsEqual, type DependencySnapshotV1 } from './dependency-snapshot.js';
-import { buildEnvHashes } from './env-snapshot.js';
+import { buildEnvHashes, type EnvHashes } from './env-snapshot.js';
 import { sha256File, sha256String } from './file-hash.js';
 import { tryReadLcovSummary } from './coverage-ingest.js';
 import {
@@ -81,13 +82,15 @@ import {
   writeScanInterruptedMarker,
 } from './scan-cache.js';
 import {
+  activateScanMetrics,
   buildScoreDiagnostics,
   computeHotspots,
   computeScores,
+  createScanMetrics,
   deduplicateIssues,
   notePipelineAndDedupedCounts,
   noteRawGatherIssueCount,
-  resetScanReportingMetrics,
+  type ScanReportingMetrics,
 } from './scoring-engine.js';
 import type {
   ApiScanResult,
@@ -97,18 +100,25 @@ import type {
   DatabaseAnalysisResult,
   EngineTiming,
   EnvScanResult,
+  HotspotItem,
   InventoryScanResult,
   Issue,
   LintScanResult,
   MemoryScanResult,
+  MigrationScanResult,
+  OutdatedDepsScanResult,
   PerformanceScanResult,
   ProjectProfile,
   ScanOptions,
   ScanResult,
   SecurityScanResult,
+  TestCoverageScanResult,
 } from './types.js';
 import { tryAutoUpdateVulnDb } from './vuln-auto-update.js';
 import { redactScanResultForStorage } from '../report/redact-evidence.js';
+import { parseJson, isDependencySnapshotV1, isVulnDbMeta } from '../utils/type-guards.js';
+
+// ─── Constants ───────────────────────────────────────────────────────────────
 
 const EMPTY_API: ApiScanResult = { issues: [], routes: [] };
 const EMPTY_ENV: EnvScanResult = { issues: [], envFiles: [], keysFound: [] };
@@ -116,8 +126,59 @@ const EMPTY_PERFORMANCE: PerformanceScanResult = { issues: [] };
 const EMPTY_MEMORY: MemoryScanResult = { issues: [] };
 const EMPTY_CODE_SMELL: CodeSmellScanResult = { issues: [] };
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_BUNDLE_BYTES = 20 * 1024 * 1024; // 20 MB
 
-type CacheMode = 'full-reuse' | 'shallow-reuse' | 'incremental' | 'cold-start';
+export type CacheMode = 'full-reuse' | 'shallow-reuse' | 'incremental' | 'cold-start';
+
+// ─── Intermediate pipeline types ─────────────────────────────────────────────
+
+export interface CacheState {
+  readonly previousHashes: Record<string, string>;
+  readonly previousMerged: ScanResult | undefined;
+  readonly previousEnv: EnvHashes | undefined;
+  readonly previousContents: Record<string, string> | undefined;
+  readonly previousDep: DependencySnapshotV1 | undefined;
+  readonly astByFileMap: Map<string, FileAstAnalysis>;
+  readonly coldStart: boolean;
+}
+
+export interface FileState {
+  readonly normalizedFiles: readonly string[];
+  readonly fileSet: ReadonlySet<string>;
+  readonly currentHashes: Record<string, string>;
+  readonly dirtyFiles: ReadonlySet<string>;
+  readonly reanalyzedFiles: ReadonlySet<string>;
+  readonly contents: Map<string, string>;
+  readonly sizes: Map<string, number>;
+  readonly cacheMode: CacheMode;
+  readonly dependencyDirty: boolean;
+  readonly envDirty: boolean;
+  readonly removedFiles: boolean;
+  readonly diffFilter: ReadonlySet<string> | undefined;
+  readonly dependencySnapshotNow: DependencySnapshotV1 | null;
+  readonly envSnapshotNow: EnvHashes;
+}
+
+export interface RawEngineOutput {
+  readonly ast: AstScanResult;
+  readonly astAnalyses: readonly FileAstAnalysis[];
+  readonly security: SecurityScanResult;
+  readonly dependency: DependencyScanResult;
+  readonly outdated: OutdatedDepsScanResult;
+  readonly migration: MigrationScanResult;
+  readonly tests: TestCoverageScanResult;
+  readonly api: ApiScanResult;
+  readonly env: EnvScanResult;
+  readonly performance: PerformanceScanResult;
+  readonly memory: MemoryScanResult;
+  readonly codeSmell: CodeSmellScanResult;
+  readonly architecture: ArchitectureScanResult;
+  readonly database: DatabaseAnalysisResult;
+  readonly inventory: InventoryScanResult;
+  readonly lint: LintScanResult;
+}
+
+// ─── Small helpers ────────────────────────────────────────────────────────────
 
 interface TimingsRecorder {
   readonly timings: readonly EngineTiming[];
@@ -129,9 +190,7 @@ function createTimingsRecorder(): TimingsRecorder {
   const timings: EngineTiming[] = [];
   return {
     timings,
-    push(entry) {
-      timings.push(entry);
-    },
+    push(entry) { timings.push(entry); },
     async record<T>(name: string, work: () => Promise<T> | T): Promise<T> {
       const started = Date.now();
       try {
@@ -160,84 +219,28 @@ function issueFromCrash(engine: string, cwd: string, error: unknown): Issue {
   };
 }
 
-function hashObject(value: unknown): string {
-  return sha256String(JSON.stringify(value));
-}
-
-function requireMergedScan(scan: ScanResult | undefined, context: string): ScanResult {
-  if (scan === undefined) {
-    throw new Error(`internal: ${context} requires a merged scan`);
-  }
-  return scan;
-}
-
-async function readDependencySnapshotAlias(outDir: string): Promise<DependencySnapshotV1 | undefined> {
-  const primary = await loadDependencySnapshot(outDir);
-  if (primary !== undefined) {
-    return primary;
-  }
-  const aliasPath = join(outDir, '.cache', 'dep-snapshot.json');
-  if (!existsSync(aliasPath)) {
-    return undefined;
-  }
+async function guarded<T>(
+  engine: string,
+  cwd: string,
+  work: () => Promise<T>,
+  fallback: (issue: Issue) => T,
+): Promise<T> {
   try {
-    return JSON.parse(await readFile(aliasPath, 'utf8')) as DependencySnapshotV1;
-  } catch {
-    return undefined;
-  }
-}
-
-async function warnOnVulnDbStaleness(outDir: string, offline: boolean | undefined): Promise<void> {
-  if (offline === true) {
-    return;
-  }
-  const metaPath = join(outDir, '.cache', 'vuln-db-meta.json');
-  if (!existsSync(metaPath)) {
-    return;
-  }
-  try {
-    const raw = await readFile(metaPath, 'utf8');
-    const parsed = JSON.parse(raw) as { fetchedAt?: string };
-    if (typeof parsed.fetchedAt !== 'string') {
-      return;
-    }
-    const fetchedAt = Date.parse(parsed.fetchedAt);
-    if (Number.isNaN(fetchedAt) || Date.now() - fetchedAt <= SEVEN_DAYS_MS) {
-      return;
-    }
-    logger.warn(
-      { fetchedAt: parsed.fetchedAt },
-      'vulnerability DB metadata is older than 7 days; run update-vuln-db or use --auto-update-db',
-    );
+    return await work();
   } catch (error) {
-    logger.debug({ err: error }, 'failed to read vulnerability DB metadata');
+    logger.warn({ engine, err: error }, 'engine failed');
+    return fallback(issueFromCrash(engine, cwd, error));
   }
 }
 
-function verificationStepForHotspot(issue: Issue): string {
-  if (issue.engine === 'lint') {
-    return 'Run lint/typecheck until clean; re-scan.';
-  }
-  if (issue.engine === 'dependency' || issue.engine === 'outdated') {
-    return 'Update dependency / lockfile; re-run audit and scan.';
-  }
-  return 'Add or run targeted tests for the module; re-run project-inspector.';
-}
-
-function hotspotItems(issues: readonly Issue[]): ScanResult['hotspots'] {
-  return issues.map((issue, index) => ({
-    rank: index + 1,
-    severity: issue.severity,
-    title: issue.title,
-    file: issue.file,
-    line: issue.line,
-    engine: issue.engine,
-    impact: issue.impact,
-    fixHint: issue.fix,
-    rootCause: issue.whyItMatters ?? issue.description,
-    verifyStep: verificationStepForHotspot(issue),
-    attackChain: buildAttackChainNarrative(issue),
-  }));
+/** Lightweight scan fingerprint — avoids serializing the entire ScanResult. */
+export function scanFingerprint(r: ScanResult): string {
+  return sha256String([
+    String(r.ast.filesAnalyzed),
+    String(r.trustedIssues?.length ?? 0),
+    String(r.scores.productionReadiness),
+    r.finishedAt,
+  ].join('::'));
 }
 
 function gateThresholdsFromConfig(config: InspectorConfig): NonNullable<ScanResult['gateThresholds']> {
@@ -247,48 +250,53 @@ function gateThresholdsFromConfig(config: InspectorConfig): NonNullable<ScanResu
   };
 }
 
-function scoreMetaForScan(result: Pick<ScanResult, 'tests'>): { readonly testFileCount: number; readonly sourceFileCount: number } {
-  return {
-    testFileCount: result.tests.testFileCount,
-    sourceFileCount: result.tests.sourceFileCount,
-  };
+function hotspotItems(issues: readonly Issue[]): ScanResult['hotspots'] {
+  return issues.map((issue, index): HotspotItem => ({
+    rank: index + 1,
+    severity: issue.severity,
+    title: issue.title,
+    file: issue.file,
+    line: issue.line,
+    engine: issue.engine,
+    impact: issue.impact,
+    fixHint: issue.fix,
+    rootCause: issue.whyItMatters ?? issue.description,
+    verifyStep: issue.engine === 'lint'
+      ? 'Run lint/typecheck until clean; re-scan.'
+      : issue.engine === 'dependency' || issue.engine === 'outdated'
+        ? 'Update dependency / lockfile; re-run audit and scan.'
+        : 'Add or run targeted tests for the module; re-run project-inspector.',
+    attackChain: buildAttackChainNarrative(issue),
+  }));
 }
 
-function mergeApi(
-  previous: ApiScanResult | undefined,
-  allFiles: ReadonlySet<string>,
-  reanalyzedFiles: ReadonlySet<string>,
-  fresh: ApiScanResult,
-): ApiScanResult {
-  if (previous === undefined) {
-    return fresh;
-  }
-  return {
-    routes: mergeApiRoutes(previous.routes, reanalyzedFiles, fresh.routes),
-    issues: mergeIssuesByReanalyze(previous.issues, allFiles, reanalyzedFiles, fresh.issues),
-  };
-}
-
-async function guarded<T>(engine: string, cwd: string, work: () => Promise<T>, fallback: (issue: Issue) => T): Promise<T> {
+async function readDependencySnapshotAlias(outDir: string): Promise<DependencySnapshotV1 | undefined> {
+  const primary = await loadDependencySnapshot(outDir);
+  if (primary !== undefined) return primary;
+  const aliasPath = join(outDir, '.cache', 'dep-snapshot.json');
+  if (!existsSync(aliasPath)) return undefined;
   try {
-    return await work();
-  } catch (error) {
-    logger.warn({ engine, err: error }, 'engine failed');
-    return fallback(issueFromCrash(engine, cwd, error));
+    const raw = await readFile(aliasPath, 'utf8');
+    return parseJson(raw, isDependencySnapshotV1, undefined as unknown as DependencySnapshotV1) ?? undefined;
+  } catch {
+    return undefined;
   }
 }
 
-interface NamedTask {
-  readonly name: string;
-  readonly work: () => Promise<unknown>;
-}
-
-async function runNamedTasks(tasks: readonly NamedTask[], concurrency: number): Promise<ReadonlyMap<string, unknown>> {
-  const pairs = await runPool(tasks, Math.min(concurrency, Math.max(tasks.length, 1)), async (task) => [
-    task.name,
-    await task.work(),
-  ] as const);
-  return new Map<string, unknown>(pairs);
+async function warnOnVulnDbStaleness(outDir: string, offline: boolean | undefined): Promise<void> {
+  if (offline === true) return;
+  const metaPath = join(outDir, '.cache', 'vuln-db-meta.json');
+  if (!existsSync(metaPath)) return;
+  try {
+    const raw = await readFile(metaPath, 'utf8');
+    const parsed = parseJson(raw, isVulnDbMeta, {});
+    if (typeof parsed.fetchedAt !== 'string') return;
+    const fetchedAt = Date.parse(parsed.fetchedAt);
+    if (Number.isNaN(fetchedAt) || Date.now() - fetchedAt <= SEVEN_DAYS_MS) return;
+    logger.warn({ fetchedAt: parsed.fetchedAt }, 'vulnerability DB metadata is older than 7 days; run update-vuln-db or use --auto-update-db');
+  } catch (error) {
+    logger.debug({ err: error }, 'failed to read vulnerability DB metadata');
+  }
 }
 
 function computeTouchedSections(args: {
@@ -301,243 +309,142 @@ function computeTouchedSections(args: {
   readonly mode: ScanOptions['mode'];
 }): ReadonlySet<ReportSection> {
   if (args.coldStart || args.hadRemovedFiles) {
-    return new Set<ReportSection>([
-      'summary',
-      'production-decision',
-      'security',
-      'dependencies',
-      'api',
-      'architecture',
-      'performance',
-      'ast',
-      'test',
-      'database',
-    ]);
+    return new Set<ReportSection>(['api', 'architecture', 'database']);
   }
-
-  const touched = new Set<ReportSection>(['summary', 'production-decision', 'security']);
+  const touched = new Set<ReportSection>();
   if (args.astDirty || args.partialFilesChanged) {
-    touched.add('ast');
     touched.add('architecture');
-    touched.add('security');
-    if (args.mode !== 'quick') {
-      touched.add('api');
-      touched.add('performance');
-      touched.add('database');
-    }
+    if (args.mode !== 'quick') { touched.add('api'); touched.add('database'); }
   }
-  if (args.depDirty) {
-    touched.add('dependencies');
-    touched.add('security');
-  }
-  if (args.envDirty) {
-    touched.add('security');
-  }
-  touched.add('test');
   touched.add('database');
   return touched;
 }
 
-function defaultScores(): ScanResult['scores'] {
+// ─── Stage 1: resolveCache ────────────────────────────────────────────────────
+
+export async function resolveCache(options: Pick<ScanOptions, 'cwd' | 'outDir' | 'rescan' | 'useFileCache'>): Promise<CacheState> {
+  const { outDir, cwd } = options;
+  const skipCache = options.rescan === true || options.useFileCache === false;
+
+  const [previousHashesFile, previousMergedRaw, previousEnv, previousContents, interrupted, previousDep, astByFileMap] =
+    await Promise.all([
+      skipCache ? Promise.resolve(undefined) : loadFileHashes(outDir),
+      skipCache ? Promise.resolve(undefined) : loadMergedScan(outDir),
+      skipCache ? Promise.resolve(undefined) : loadEnvSnapshot(outDir),
+      skipCache ? Promise.resolve(undefined) : loadFileContentsBundle(outDir),
+      skipCache ? Promise.resolve(false) : loadScanInterrupted(outDir),
+      skipCache ? Promise.resolve(undefined) : readDependencySnapshotAlias(outDir),
+      skipCache ? Promise.resolve(new Map<string, FileAstAnalysis>()) : loadAstByFileMap(outDir, cwd),
+    ]);
+
+  const previousMerged = previousMergedRaw ? ensureScanShape(previousMergedRaw) : undefined;
+  const coldStart = skipCache || previousMerged === undefined || interrupted;
+
   return {
-    security: 0,
-    performance: 0,
-    codeQuality: 0,
-    compliance: 0,
-    tests: 0,
-    productionReadiness: 0,
+    previousHashes: previousHashesFile?.hashes ?? {},
+    previousMerged,
+    previousEnv,
+    previousContents,
+    previousDep,
+    astByFileMap,
+    coldStart,
   };
 }
 
-export async function runScan(options: ScanOptions): Promise<ScanResult> {
-  const cwd = resolve(options.cwd);
-  const outDir = resolve(options.outDir);
-  const concurrency = Math.max(1, options.concurrency);
-  const startedAt = new Date().toISOString();
-  const timings = createTimingsRecorder();
+// ─── Stage 2: discoverAndHash ─────────────────────────────────────────────────
+
+export async function discoverAndHash(
+  options: ScanOptions,
+  cache: CacheState,
+  timings: TimingsRecorder,
+): Promise<FileState> {
+  const { cwd, outDir, concurrency } = options;
+  const incrementalMode = options.rescan === true ? false : options.mode === 'diff' || options.incremental;
+
+  const sourceFiles = await timings.record('discover-files', () => discoverSourceFiles(cwd));
+  const normalizedFiles = sourceFiles.map((file) => normalize(file));
+  const fileSet = new Set<string>(normalizedFiles);
+
+  const progress = new ScanProgress(normalizedFiles.length);
+  const hashPairs = await timings.record('file-hashes', () =>
+    runPool(normalizedFiles, Math.max(1, concurrency), async (file) => {
+      progress.tick(file);
+      return [relKey(cwd, file), await sha256File(file)] as const;
+    }),
+  );
+  progress.complete();
+
+  const currentHashes: Record<string, string> = Object.fromEntries(hashPairs);
+  const { previousHashes, previousMerged, coldStart, previousContents } = cache;
+
+  const dirtySet = new Set<string>();
+  if (coldStart) {
+    for (const f of normalizedFiles) dirtySet.add(f);
+  } else {
+    for (const f of normalizedFiles) {
+      const k = relKey(cwd, f);
+      if (previousHashes[k] !== currentHashes[k]) dirtySet.add(f);
+    }
+  }
+
+  const removedFiles = Object.keys(previousHashes).some((k) => !(k in currentHashes));
+
   const online = options.mode === 'quick' ? false : options.online;
-  const skipCache = options.rescan === true || options.useFileCache === false;
-  const incrementalMode =
-    options.rescan === true ? false : options.mode === 'diff' || options.incremental;
 
-  await mkdir(outDir, { recursive: true });
+  if (options.autoUpdateDb === true && options.offline !== true) {
+    await tryAutoUpdateVulnDb(outDir);
+  }
+  await warnOnVulnDbStaleness(outDir, options.offline);
 
-  const handleSigInt = (): void => {
-    void writeScanInterruptedMarker(outDir);
-  };
-  process.on('SIGINT', handleSigInt);
+  const dependencySnapshotNow = await buildDependencySnapshot(cwd, outDir);
+  const previousDep = cache.previousDep;
+  const dependencyDirty =
+    coldStart ||
+    dependencySnapshotNow === null ||
+    previousDep === undefined ||
+    !snapshotsEqual(previousDep, dependencySnapshotNow) ||
+    (online && options.mode !== 'quick');
 
-  try {
-    resetScanReportingMetrics();
-    const sourceFiles = await timings.record('discover-files', () => discoverSourceFiles(cwd));
-    const normalizedFiles = sourceFiles.map((file) => normalize(file));
-    const fileSet = new Set<string>(normalizedFiles);
+  const envSnapshotNow = await buildEnvHashes(cwd);
+  const envDirty = coldStart || JSON.stringify(envSnapshotNow) !== JSON.stringify(cache.previousEnv ?? {});
 
-    const [previousHashesFile, previousMergedRaw, previousEnvSnapshot, previousContents, interrupted, previousDepSnapshot, astByFileMap] =
-      await Promise.all([
-        skipCache ? Promise.resolve(undefined) : loadFileHashes(outDir),
-        skipCache ? Promise.resolve(undefined) : loadMergedScan(outDir),
-        skipCache ? Promise.resolve(undefined) : loadEnvSnapshot(outDir),
-        skipCache ? Promise.resolve(undefined) : loadFileContentsBundle(outDir),
-        skipCache ? Promise.resolve(false) : loadScanInterrupted(outDir),
-        skipCache ? Promise.resolve(undefined) : readDependencySnapshotAlias(outDir),
-        skipCache ? Promise.resolve(new Map<string, FileAstAnalysis>()) : loadAstByFileMap(outDir, cwd),
-      ]);
-
-    const previousMerged = previousMergedRaw ? ensureScanShape(previousMergedRaw) : undefined;
-    const previousHashes = previousHashesFile?.hashes ?? {};
-    const coldStart = skipCache || previousMerged === undefined || interrupted;
-
-    const profile: ProjectProfile = await timings.record('profile', () => detectProjectProfile(cwd));
-    const inspectorConfig = await mergePolicyPack(cwd, await loadInspectorConfig(cwd));
-    const pluginSuppress = await collectPluginSuppressPatterns(cwd);
-    const inspectorConfigMerged: InspectorConfig = {
-      ...inspectorConfig,
-      suppressTitleSubstrings: [...inspectorConfig.suppressTitleSubstrings, ...pluginSuppress],
-    };
-
-    const hashPairs = await timings.record('file-hashes', () =>
-      runPool(normalizedFiles, concurrency, async (file) => [relKey(cwd, file), await sha256File(file)] as const),
-    );
-    const currentHashes: Record<string, string> = Object.fromEntries(hashPairs);
-
-    const dirtyFiles = new Set<string>();
-    if (coldStart) {
-      for (const file of normalizedFiles) {
-        dirtyFiles.add(file);
-      }
-    } else {
-      for (const file of normalizedFiles) {
-        const key = relKey(cwd, file);
-        if (previousHashes[key] !== currentHashes[key]) {
-          dirtyFiles.add(file);
-        }
-      }
+  let diffFilter: Set<string> | undefined;
+  if (incrementalMode) {
+    const gitChangedPaths = await getGitChangedPaths(cwd);
+    if (gitChangedPaths !== null && gitChangedPaths.length > 0) {
+      const filtered = gitChangedPaths.map((f) => normalize(f)).filter((f) => fileSet.has(f));
+      if (filtered.length > 0) diffFilter = new Set(filtered);
     }
+  }
 
-    const removedFiles = Object.keys(previousHashes).some((key) => !(key in currentHashes));
+  const effectiveDirty = new Set<string>();
+  for (const f of dirtySet) {
+    if (diffFilter === undefined || diffFilter.has(f)) effectiveDirty.add(f);
+  }
 
-    if (options.autoUpdateDb === true && options.offline !== true) {
-      await tryAutoUpdateVulnDb(outDir);
-    }
-    await warnOnVulnDbStaleness(outDir, options.offline);
+  const reanalyzedFiles =
+    coldStart || diffFilter === undefined
+      ? new Set<string>(coldStart ? normalizedFiles : effectiveDirty)
+      : new Set<string>([...diffFilter].filter((f) => effectiveDirty.has(f)));
 
-    const dependencySnapshotNow = await buildDependencySnapshot(cwd, outDir);
-    const dependencyDirty =
-      coldStart ||
-      dependencySnapshotNow === null ||
-      previousDepSnapshot === undefined ||
-      !snapshotsEqual(previousDepSnapshot, dependencySnapshotNow) ||
-      (online && options.mode !== 'quick');
+  const fullReuse =
+    !coldStart &&
+    previousMerged?.mode === options.mode &&
+    !removedFiles &&
+    dirtySet.size === 0 &&
+    !dependencyDirty &&
+    !envDirty &&
+    !incrementalMode &&
+    !online;
 
-    const envSnapshotNow = await buildEnvHashes(cwd);
-    const envDirty = coldStart || JSON.stringify(envSnapshotNow) !== JSON.stringify(previousEnvSnapshot ?? {});
+  const cacheMode: CacheMode = fullReuse ? 'full-reuse' : coldStart ? 'cold-start' : reanalyzedFiles.size > 0 ? 'incremental' : 'shallow-reuse';
+  logger.debug({ cacheMode }, 'scan cache mode resolved');
 
-    let diffFilter: Set<string> | undefined;
-    if (incrementalMode) {
-      const gitChangedPaths = await getGitChangedPaths(cwd);
-      if (gitChangedPaths !== null && gitChangedPaths.length > 0) {
-        const filtered = gitChangedPaths.map((file) => normalize(file)).filter((file) => fileSet.has(file));
-        if (filtered.length > 0) {
-          diffFilter = new Set(filtered);
-        }
-      }
-    }
-
-    const effectiveDirty = new Set<string>();
-    for (const file of dirtyFiles) {
-      if (diffFilter === undefined || diffFilter.has(file)) {
-        effectiveDirty.add(file);
-      }
-    }
-
-    const reanalyzedFiles =
-      coldStart || diffFilter === undefined
-        ? new Set<string>(coldStart ? normalizedFiles : effectiveDirty)
-        : new Set<string>([...diffFilter].filter((file) => effectiveDirty.has(file)));
-
-    const fullReuse =
-      !coldStart &&
-      previousMerged.mode === options.mode &&
-      !removedFiles &&
-      dirtyFiles.size === 0 &&
-      !dependencyDirty &&
-      !envDirty &&
-      !incrementalMode &&
-      !online;
-
-    const shallowReuse =
-      !coldStart &&
-      previousMerged.mode === options.mode &&
-      !removedFiles &&
-      reanalyzedFiles.size === 0 &&
-      !online;
-
-    const cacheMode: CacheMode = fullReuse
-      ? 'full-reuse'
-      : coldStart
-        ? 'cold-start'
-        : reanalyzedFiles.size > 0
-          ? 'incremental'
-          : 'shallow-reuse';
-    logger.info({ cacheMode }, 'scan cache mode resolved');
-
-    const prCommentScopePaths = await resolvePrCommentScope(options, cwd);
-
-    if (fullReuse) {
-      const merged = requireMergedScan(previousMerged, 'fullReuse');
-      const polyglotIssues = await runPolyglotEngine(cwd);
-      const mergedWithPoly: ScanResult = {
-        ...merged,
-        codeSmell: { ...merged.codeSmell, issues: [...merged.codeSmell.issues, ...polyglotIssues] },
-      };
-      const finishedAt = new Date().toISOString();
-      const enriched = enrichAllIssues({ ...mergedWithPoly, startedAt, finishedAt, profile });
-      const intel = await extractDatabaseIntelligence(cwd, enriched.inventory.files, enriched.database.ormSignals);
-      const enrichedWithDb: ScanResult = { ...enriched, database: { ...enriched.database, intelligence: intel } };
-      const gateThresholds = gateThresholdsFromConfig(inspectorConfigMerged);
-      const gathered = gatherAllIssues(enrichedWithDb);
-      noteRawGatherIssueCount(gathered.length);
-      const piped = applyIssuePipeline(gathered, inspectorConfigMerged, cwd);
-      const trusted = deduplicateIssues(piped);
-      notePipelineAndDedupedCounts(piped.length, trusted.length);
-      const scores = computeScores(trusted, scoreMetaForScan(enrichedWithDb));
-      const scoreDiagnostics = buildScoreDiagnostics(trusted);
-      const hotspots = hotspotItems(computeHotspots(trusted, enrichedWithDb.api.routes));
-      const scanForDecision: ScanResult = { ...enrichedWithDb, gateThresholds };
-      const productionDecision = buildProductionDecision(scanForDecision, trusted, scores);
-      const baselineFile = await loadBaselineTrusted(outDir);
-      const baselineComparison = compareTrustedToBaseline(cwd, trusted, baselineFile);
-      if (options.saveBaseline === true) {
-        await saveBaselineTrusted(outDir, trusted, cwd);
-      }
-      const baselineHistory = await loadBaselineHistory(outDir);
-      const reused: ScanResult = {
-        ...scanForDecision,
-        scores,
-        scoreDiagnostics,
-        hotspots,
-        trustedIssues: trusted,
-        productionDecision,
-        ...(baselineComparison !== undefined ? { baselineComparison } : {}),
-        ...(baselineHistory.length > 0 ? { baselineHistory } : {}),
-        ...(prCommentScopePaths !== undefined ? { prCommentScopePaths } : {}),
-      };
-      await saveScanMeta(outDir, {
-        version: 1,
-        lastScanAt: finishedAt,
-        lastScanDurationMs: 0,
-        cacheHit: true,
-      });
-      await writeScanArtifacts(reused, outDir);
-      await clearScanInterruptedMarker(outDir);
-      return reused;
-    }
-
-    const contents = new Map<string, string>();
-    const sizes = new Map<string, number>();
+  const contents = new Map<string, string>();
+  const sizes = new Map<string, number>();
+  if (!fullReuse) {
     await timings.record('read-files', () =>
-      runPool(normalizedFiles, concurrency, async (file) => {
+      runPool(normalizedFiles, Math.max(1, concurrency), async (file) => {
         const key = relKey(cwd, file);
         const cached = previousContents?.[key];
         const unchanged = !coldStart && previousHashes[key] === currentHashes[key];
@@ -556,538 +463,457 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
         }
       }),
     );
+  }
 
-    const getSourceText = (file: string): string | undefined => contents.get(normalize(file));
-    const morphProject = new MorphProject({
-      skipAddingFilesFromTsConfig: true,
-      compilerOptions: {
-        allowJs: true,
-        checkJs: false,
-        jsx: JsxEmit.ReactJSX,
-        target: ScriptTarget.ES2022,
-      },
+  return {
+    normalizedFiles,
+    fileSet,
+    currentHashes,
+    dirtyFiles: dirtySet,
+    reanalyzedFiles,
+    contents,
+    sizes,
+    cacheMode,
+    dependencyDirty,
+    envDirty,
+    removedFiles,
+    diffFilter,
+    dependencySnapshotNow,
+    envSnapshotNow,
+  };
+}
+
+// ─── Stage 3: runEngines ──────────────────────────────────────────────────────
+
+type AstScanResult = import('./types.js').AstScanResult;
+
+export async function runEngines(
+  options: ScanOptions,
+  fileState: FileState,
+  cache: CacheState,
+  config: InspectorConfig,
+  profile: ProjectProfile,
+  timings: TimingsRecorder,
+  statusFn: (msg: string) => void,
+): Promise<RawEngineOutput> {
+  const { cwd, concurrency } = options;
+  const { normalizedFiles, fileSet, reanalyzedFiles, contents, sizes, cacheMode, dependencyDirty, diffFilter } = fileState;
+  const { previousMerged, coldStart, astByFileMap } = cache;
+  const shallowReuse = cacheMode === 'shallow-reuse';
+  const online = options.mode === 'quick' ? false : options.online;
+
+  const getSourceText = (file: string): string | undefined => contents.get(normalize(file));
+  const morphProject = new MorphProject({
+    skipAddingFilesFromTsConfig: true,
+    compilerOptions: { allowJs: true, checkJs: false, jsx: JsxEmit.ReactJSX, target: ScriptTarget.ES2022 },
+  });
+  const morph = { project: morphProject, runExclusive: createSerialQueue(), getSourceText };
+
+  const baseOptions = { sourceFiles: normalizedFiles, getSourceText };
+  const filteredOptions = diffFilter ? { ...baseOptions, fileFilter: diffFilter } : baseOptions;
+  const astOptions: AstEngineOptions = { ...filteredOptions, ...(diffFilter ? { partial: true } : {}), morph };
+  const securityOptions: SecurityEngineOptions = { ...filteredOptions, morph, profile };
+
+  // ── AST ──────────────────────────────────────────────────────────────────
+  statusFn('Analyzing code structure...');
+  const astRun = (override?: Partial<AstEngineOptions>): Promise<AstEngineRun> =>
+    guarded('ast', cwd, () => runAstEngineWithAnalyses(cwd, concurrency, { ...astOptions, ...override }), (issue) => ({
+      analyses: [], scan: { filesAnalyzed: 0, functions: [], issues: [issue], importGraph: [], circularDependencyChains: [] },
+    }));
+
+  let ast: AstScanResult = previousMerged?.ast ?? { filesAnalyzed: 0, functions: [], issues: [], importGraph: [], circularDependencyChains: [] };
+  let astAnalyses: readonly FileAstAnalysis[] = [];
+  let astDirty = coldStart || reanalyzedFiles.size > 0 || fileState.removedFiles;
+
+  if (shallowReuse) {
+    ast = previousMerged ? previousMerged.ast : ast;
+    astDirty = false;
+  } else if (!coldStart && astByFileMap.size > 0 && reanalyzedFiles.size > 0 && diffFilter === undefined && !fileState.removedFiles) {
+    const inc = await timings.record('ast', () => astRun({ incremental: { dirtyPaths: reanalyzedFiles, cachedByFile: astByFileMap } }));
+    ast = inc.scan; astAnalyses = inc.analyses;
+  } else {
+    const full = await timings.record('ast', () => astRun());
+    ast = full.scan; astAnalyses = full.analyses;
+  }
+
+  // ── Security ─────────────────────────────────────────────────────────────
+  statusFn('Scanning security patterns...');
+  let security: SecurityScanResult;
+  if (shallowReuse) {
+    security = previousMerged ? previousMerged.security : { issues: [] };
+  } else if (!coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length) {
+    const fresh = await timings.record('security', () =>
+      guarded('security', cwd, () => runSecurityEngine(cwd, concurrency, { ...securityOptions, pathsOverride: reanalyzedFiles }), (i) => ({ issues: [i] })));
+    security = {
+      issues: mergeIssuesByReanalyze(previousMerged ? previousMerged.security.issues : [], fileSet, reanalyzedFiles, fresh.issues),
+    };
+  } else {
+    security = await timings.record('security', () =>
+      guarded('security', cwd, () => runSecurityEngine(cwd, concurrency, securityOptions), (i) => ({ issues: [i] })));
+  }
+
+  // ── Dependency / outdated / migration ────────────────────────────────────
+  statusFn('Checking dependencies...');
+  const [dependency, outdated, migration] = await Promise.all([
+    dependencyDirty
+      ? timings.record('dependency', () => guarded('dependency', cwd, () => runDependencyEngine(cwd, online, { reportOutDir: options.outDir, offline: options.offline === true }), (i): DependencyScanResult => ({ issues: [i], lockfileKind: 'none', directDependencyCount: 0 })))
+      : Promise.resolve(previousMerged ? previousMerged.dependency : { issues: [], lockfileKind: 'none' as const, directDependencyCount: 0 }),
+    dependencyDirty
+      ? timings.record('outdated', () => guarded('outdated', cwd, () => runOutdatedEngine(cwd), (i) => ({ ...EMPTY_OUTDATED, issues: [i] })))
+      : Promise.resolve(previousMerged ? previousMerged.outdated : { ...EMPTY_OUTDATED }),
+    dependencyDirty
+      ? timings.record('migration', () => guarded('migration', cwd, () => runMigrationEngine(cwd), (i) => ({ issues: [i] })))
+      : Promise.resolve(previousMerged ? previousMerged.migration : { issues: [] }),
+  ]);
+
+  // ── Parallel engines ─────────────────────────────────────────────────────
+  statusFn('Mapping API surface...');
+  type NamedTask = { readonly name: string; readonly work: () => Promise<unknown> };
+  const groupedTasks: NamedTask[] = [];
+
+  if (!shallowReuse) {
+    groupedTasks.push({
+      name: 'api',
+      work: () => guarded('api', cwd, () => runApiEngine(cwd, concurrency, {
+        ...filteredOptions,
+        ...(config.intentionalPublicRouteGlobs && config.intentionalPublicRouteGlobs.length > 0 ? { intentionalPublicRouteGlobs: config.intentionalPublicRouteGlobs } : {}),
+        ...(reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length ? { pathsOverride: reanalyzedFiles } : {}),
+      }), (i) => ({ ...EMPTY_API, issues: [i] })),
     });
-    const morph = {
-      project: morphProject,
-      runExclusive: createSerialQueue(),
-      getSourceText,
-    };
+  }
 
-    const baseOptions = { sourceFiles: normalizedFiles, getSourceText };
-    const filteredOptions = diffFilter ? { ...baseOptions, fileFilter: diffFilter } : baseOptions;
-    const astOptions: AstEngineOptions = {
-      ...filteredOptions,
-      ...(diffFilter ? { partial: true } : {}),
-      morph,
-    };
-    const securityOptions: SecurityEngineOptions = {
-      ...filteredOptions,
-      morph,
-      profile,
-    };
+  if (options.mode !== 'quick' && (fileState.envDirty || !shallowReuse)) {
+    groupedTasks.push({ name: 'env', work: () => guarded('env', cwd, () => runEnvEngine(cwd, baseOptions), (i) => ({ ...EMPTY_ENV, issues: [i] })) });
+  }
 
-    const astRun = async (override?: Partial<AstEngineOptions>): Promise<AstEngineRun> =>
-      guarded(
-        'ast',
-        cwd,
-        () => runAstEngineWithAnalyses(cwd, concurrency, { ...astOptions, ...override }),
-        (issue) => ({
-          analyses: [],
-          scan: {
-            filesAnalyzed: 0,
-            functions: [],
-            issues: [issue],
-            importGraph: [],
-            circularDependencyChains: [],
-          },
-        }),
-      );
-
-    let ast = previousMerged?.ast ?? {
-      filesAnalyzed: 0,
-      functions: [],
-      issues: [],
-      importGraph: [],
-      circularDependencyChains: [],
-    };
-    let astAnalyses: readonly FileAstAnalysis[] = [];
-    let astDirty = coldStart || reanalyzedFiles.size > 0 || removedFiles;
-
-    if (shallowReuse) {
-      ast = requireMergedScan(previousMerged, 'shallowReuse-ast').ast;
-      astDirty = false;
-    } else if (
-      !coldStart &&
-      astByFileMap.size > 0 &&
-      reanalyzedFiles.size > 0 &&
-      diffFilter === undefined &&
-      !removedFiles
-    ) {
-      const incrementalAst = await timings.record('ast', () =>
-        astRun({ incremental: { dirtyPaths: reanalyzedFiles, cachedByFile: astByFileMap } }),
-      );
-      ast = incrementalAst.scan;
-      astAnalyses = incrementalAst.analyses;
-    } else {
-      const fullAst = await timings.record('ast', () => astRun());
-      ast = fullAst.scan;
-      astAnalyses = fullAst.analyses;
-    }
-
-    let security: SecurityScanResult;
-    if (shallowReuse) {
-      security = requireMergedScan(previousMerged, 'shallowReuse-security').security;
-    } else if (!coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length) {
-      const fresh = await timings.record('security', () =>
-        guarded(
-          'security',
-          cwd,
-          () => runSecurityEngine(cwd, concurrency, { ...securityOptions, pathsOverride: reanalyzedFiles }),
-          (issue) => ({ issues: [issue] }),
-        ),
-      );
-      security = {
-        issues: mergeIssuesByReanalyze(
-          requireMergedScan(previousMerged, 'security-merge').security.issues,
-          fileSet,
-          reanalyzedFiles,
-          fresh.issues,
-        ),
-      };
-    } else {
-      security = await timings.record('security', () =>
-        guarded('security', cwd, () => runSecurityEngine(cwd, concurrency, securityOptions), (issue) => ({
-          issues: [issue],
-        })),
-      );
-    }
-
-    const dependencyPromise =
-      dependencyDirty
-        ? timings.record('dependency', () =>
-            guarded(
-              'dependency',
-              cwd,
-              () => runDependencyEngine(cwd, online, { reportOutDir: outDir, offline: options.offline === true }),
-              (issue): DependencyScanResult => ({
-                issues: [issue],
-                lockfileKind: 'none',
-                directDependencyCount: 0,
-              }),
-            ),
-          )
-        : Promise.resolve(requireMergedScan(previousMerged, 'dependency-reuse').dependency);
-
-    const outdatedPromise =
-      dependencyDirty
-        ? timings.record('outdated', () =>
-            guarded('outdated', cwd, () => runOutdatedEngine(cwd), (issue) => ({
-              ...EMPTY_OUTDATED,
-              issues: [issue],
-            })),
-          )
-        : Promise.resolve(requireMergedScan(previousMerged, 'outdated-reuse').outdated);
-
-    const migrationPromise =
-      dependencyDirty
-        ? timings.record('migration', () =>
-            guarded('migration', cwd, () => runMigrationEngine(cwd), (issue) => ({ issues: [issue] })),
-          )
-        : Promise.resolve(requireMergedScan(previousMerged, 'migration-reuse').migration);
-
-    const testEngineOpts =
-      inspectorConfig.testFileGlobs !== undefined && inspectorConfig.testFileGlobs.length > 0
-        ? { testFileGlobs: inspectorConfig.testFileGlobs }
-        : undefined;
-    const testsPromise =
-      coldStart || removedFiles || reanalyzedFiles.size > 0
-        ? timings.record('tests', () =>
-            guarded('tests', cwd, () => runTestEngine(cwd, normalizedFiles, testEngineOpts), (issue) => ({
-              ...EMPTY_TESTS,
-              issues: [issue],
-            })),
-          )
-        : Promise.resolve(requireMergedScan(previousMerged, 'tests-reuse').tests);
-
-    const groupedTasks = [
-      ...(!shallowReuse
-        ? [
-            {
-              name: 'api',
-              work: async () =>
-                guarded(
-                  'api',
-                  cwd,
-                  () =>
-                    runApiEngine(cwd, concurrency, {
-                      ...filteredOptions,
-                      ...(inspectorConfig.intentionalPublicRouteGlobs !== undefined &&
-                      inspectorConfig.intentionalPublicRouteGlobs.length > 0
-                        ? { intentionalPublicRouteGlobs: inspectorConfig.intentionalPublicRouteGlobs }
-                        : {}),
-                      ...(reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length
-                        ? { pathsOverride: reanalyzedFiles }
-                        : {}),
-                    }),
-                  (issue) => ({ ...EMPTY_API, issues: [issue] }),
-                ),
-            },
-          ]
-        : []),
-      ...(options.mode !== 'quick' && (envDirty || !shallowReuse)
-        ? [
-            {
-              name: 'env',
-              work: async () =>
-                guarded('env', cwd, () => runEnvEngine(cwd, baseOptions), (issue) => ({
-                  ...EMPTY_ENV,
-                  issues: [issue],
-                })),
-            },
-          ]
-        : []),
-      ...(options.mode !== 'quick' && !shallowReuse
-        ? [
-            {
-              name: 'performance',
-              work: async () =>
-                guarded(
-                  'performance',
-                  cwd,
-                  () =>
-                    runPerformanceEngine(cwd, concurrency, {
-                      ...filteredOptions,
-                      ...(reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length
-                        ? { pathsOverride: reanalyzedFiles }
-                        : {}),
-                    }),
-                  (issue) => ({ issues: [issue] }),
-                ),
-            },
-            {
-              name: 'memory',
-              work: async () =>
-                guarded(
-                  'memory',
-                  cwd,
-                  () =>
-                    runMemoryEngine(cwd, concurrency, {
-                      ...filteredOptions,
-                      ...(reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length
-                        ? { pathsOverride: reanalyzedFiles }
-                        : {}),
-                    }),
-                  (issue) => ({ issues: [issue] }),
-                ),
-            },
-            {
-              name: 'codeSmell',
-              work: async () =>
-                guarded(
-                  'code-smell',
-                  cwd,
-                  () =>
-                    runCodeSmellEngine(cwd, concurrency, {
-                      ...filteredOptions,
-                      ...(reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length
-                        ? { pathsOverride: reanalyzedFiles }
-                        : {}),
-                    }),
-                  (issue) => ({ issues: [issue] }),
-                ),
-            },
-          ]
-        : []),
-    ] as const;
-
-    const taskResults = groupedTasks.length > 0 ? await timings.record('parallel-engines', () => runNamedTasks(groupedTasks, concurrency)) : new Map<string, unknown>();
-
-    let api: ApiScanResult = previousMerged?.api ?? EMPTY_API;
-    let env: EnvScanResult = options.mode === 'quick' ? EMPTY_ENV : previousMerged?.env ?? EMPTY_ENV;
-    let performance: PerformanceScanResult =
-      options.mode === 'quick' ? EMPTY_PERFORMANCE : previousMerged?.performance ?? EMPTY_PERFORMANCE;
-    let memory: MemoryScanResult = options.mode === 'quick' ? EMPTY_MEMORY : previousMerged?.memory ?? EMPTY_MEMORY;
-    let codeSmell: CodeSmellScanResult =
-      options.mode === 'quick' ? EMPTY_CODE_SMELL : previousMerged?.codeSmell ?? EMPTY_CODE_SMELL;
-
-    if (groupedTasks.length > 0) {
-      const nextApi = (taskResults.get('api') as ApiScanResult | undefined) ?? EMPTY_API;
-      api =
-        !coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length
-          ? mergeApi(requireMergedScan(previousMerged, 'api-merge').api, fileSet, reanalyzedFiles, nextApi)
-          : nextApi;
-
-      env = (taskResults.get('env') as EnvScanResult | undefined) ?? EMPTY_ENV;
-
-      const nextPerf = (taskResults.get('performance') as PerformanceScanResult | undefined) ?? EMPTY_PERFORMANCE;
-      performance =
-        !coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length
-          ? {
-              issues: mergeIssuesByReanalyze(
-                requireMergedScan(previousMerged, 'performance-merge').performance.issues,
-                fileSet,
-                reanalyzedFiles,
-                nextPerf.issues,
-              ),
-            }
-          : nextPerf;
-
-      const nextMemory = (taskResults.get('memory') as MemoryScanResult | undefined) ?? EMPTY_MEMORY;
-      memory =
-        !coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length
-          ? {
-              issues: mergeIssuesByReanalyze(
-                requireMergedScan(previousMerged, 'memory-merge').memory.issues,
-                fileSet,
-                reanalyzedFiles,
-                nextMemory.issues,
-              ),
-            }
-          : nextMemory;
-
-      const nextSmell = (taskResults.get('codeSmell') as CodeSmellScanResult | undefined) ?? EMPTY_CODE_SMELL;
-      codeSmell =
-        !coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length
-          ? {
-              issues: mergeIssuesByReanalyze(
-                requireMergedScan(previousMerged, 'code-smell-merge').codeSmell.issues,
-                fileSet,
-                reanalyzedFiles,
-                nextSmell.issues,
-              ),
-            }
-          : nextSmell;
-    }
-
-    const architecturePromise: Promise<ArchitectureScanResult> =
-      shallowReuse && !astDirty
-        ? Promise.resolve(requireMergedScan(previousMerged, 'architecture-reuse').architecture)
-        : timings.record('architecture', () =>
-            guarded('architecture', cwd, () => runArchitectureEngine(cwd, ast, concurrency, filteredOptions), (issue) => ({
-              issues: [issue],
-            })),
-          );
-
-    const needDatabaseRescan = coldStart || removedFiles || reanalyzedFiles.size > 0;
-    const databasePromise: Promise<DatabaseAnalysisResult> = needDatabaseRescan
-      ? timings.record('database', () => {
-          if (!coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length) {
-            return (async (): Promise<DatabaseAnalysisResult> => {
-              const priorDb = requireMergedScan(previousMerged, 'database-merge').database;
-              const fresh = mergeDatabaseResults(
-                await runPool([...reanalyzedFiles], concurrency, (file) =>
-                  Promise.resolve(runDatabaseEngineOnFile(file, contents.get(file) ?? '')),
-                ),
-              );
-              const mergedIssues = mergeIssuesByReanalyze(
-                priorDb.issues,
-                fileSet,
-                reanalyzedFiles,
-                fresh.issues,
-              );
-              const ormSignals = [...new Set([...priorDb.ormSignals, ...fresh.ormSignals])];
-              const rawSqlFileCount = new Set(
-                mergedIssues
-                  .filter((issue) => issue.title.toLowerCase().includes('raw sql'))
-                  .map((issue) => normalize(issue.file)),
-              ).size;
-              return { issues: mergedIssues, ormSignals, rawSqlFileCount };
-            })();
-          }
-          return runPool(normalizedFiles, concurrency, (file) =>
-            Promise.resolve(runDatabaseEngineOnFile(file, contents.get(file) ?? '')),
-          ).then((parts) => mergeDatabaseResults(parts));
-        })
-      : Promise.resolve(requireMergedScan(previousMerged, 'database-reuse').database);
-
-    const inventoryPromise: Promise<InventoryScanResult> = timings.record('inventory', () =>
-      guarded(
-        'inventory',
-        cwd,
-        async () =>
-          Promise.resolve(runInventoryEngine(cwd, {
-            profile,
-            files: normalizedFiles,
-            contents,
-            sizes,
-          })),
-        (issue) => ({
-          ...EMPTY_INVENTORY,
-          issues: [issue],
-          profile,
-        }),
-      ),
+  if (options.mode !== 'quick' && !shallowReuse) {
+    const partOpts = reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length ? { pathsOverride: reanalyzedFiles } : {};
+    groupedTasks.push(
+      { name: 'performance', work: () => guarded('performance', cwd, () => runPerformanceEngine(cwd, concurrency, { ...filteredOptions, ...partOpts }), (i) => ({ issues: [i] })) },
+      { name: 'memory', work: () => guarded('memory', cwd, () => runMemoryEngine(cwd, concurrency, { ...filteredOptions, ...partOpts }), (i) => ({ issues: [i] })) },
+      { name: 'codeSmell', work: () => guarded('code-smell', cwd, () => runCodeSmellEngine(cwd, concurrency, { ...filteredOptions, ...partOpts }), (i) => ({ issues: [i] })) },
     );
+  }
 
-    const lintPromise: Promise<LintScanResult> =
-      options.mode === 'quick' || options.skipLint === true
-        ? Promise.resolve({
-            ...EMPTY_LINT,
-            skippedReason: options.mode === 'quick' ? 'quick mode skips lint engine' : 'skipLint flag was set',
-          })
-        : timings.record('lint', () =>
-            guarded(
-              'lint',
-              cwd,
-              () =>
-                runLintEngine(cwd, {
-                  budgetMs: Math.min(Math.max(options.budgetMs ?? 45_000, 15_000), 90_000),
-                }),
-              (issue) => ({ ...EMPTY_LINT, issues: [issue] }),
-            ),
-          );
+  statusFn('Computing architecture graph...');
+  const taskResultsArr = groupedTasks.length > 0
+    ? await timings.record('parallel-engines', () => runPool(groupedTasks, Math.min(concurrency, groupedTasks.length), async (task) => [task.name, await task.work()] as const))
+    : [];
+  const taskResults = new Map<string, unknown>(taskResultsArr);
 
-    const [dependency, outdated, migration, testsBase, architectureRaw, databaseBase, inventory, lint] =
-      await Promise.all([
-        dependencyPromise,
-        outdatedPromise,
-        migrationPromise,
-        testsPromise,
-        architecturePromise,
-        databasePromise,
-        inventoryPromise,
-        lintPromise,
-      ]);
+  let api: ApiScanResult = previousMerged?.api ?? EMPTY_API;
+  let env: EnvScanResult = options.mode === 'quick' ? EMPTY_ENV : previousMerged?.env ?? EMPTY_ENV;
+  let performance: PerformanceScanResult = options.mode === 'quick' ? EMPTY_PERFORMANCE : previousMerged?.performance ?? EMPTY_PERFORMANCE;
+  let memory: MemoryScanResult = options.mode === 'quick' ? EMPTY_MEMORY : previousMerged?.memory ?? EMPTY_MEMORY;
+  let codeSmell: CodeSmellScanResult = options.mode === 'quick' ? EMPTY_CODE_SMELL : previousMerged?.codeSmell ?? EMPTY_CODE_SMELL;
 
-    const archPolicyIssues = runArchitecturePolicyEngine(cwd, inspectorConfigMerged.architecturePolicy, ast.importGraph);
-    const architecture: ArchitectureScanResult = {
-      ...architectureRaw,
-      issues: [...architectureRaw.issues, ...archPolicyIssues],
-    };
+  if (groupedTasks.length > 0) {
+    const nextApi = (taskResults.get('api') as ApiScanResult | undefined) ?? EMPTY_API;
+    api = !coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length && previousMerged
+      ? { routes: mergeApiRoutes(previousMerged.api.routes, reanalyzedFiles, nextApi.routes), issues: mergeIssuesByReanalyze(previousMerged.api.issues, fileSet, reanalyzedFiles, nextApi.issues) }
+      : nextApi;
+    env = (taskResults.get('env') as EnvScanResult | undefined) ?? EMPTY_ENV;
+    const nextPerf = (taskResults.get('performance') as PerformanceScanResult | undefined) ?? EMPTY_PERFORMANCE;
+    performance = !coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length && previousMerged
+      ? { issues: mergeIssuesByReanalyze(previousMerged.performance.issues, fileSet, reanalyzedFiles, nextPerf.issues) }
+      : nextPerf;
+    const nextMem = (taskResults.get('memory') as MemoryScanResult | undefined) ?? EMPTY_MEMORY;
+    memory = !coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length && previousMerged
+      ? { issues: mergeIssuesByReanalyze(previousMerged.memory.issues, fileSet, reanalyzedFiles, nextMem.issues) }
+      : nextMem;
+    const nextSmell = (taskResults.get('codeSmell') as CodeSmellScanResult | undefined) ?? EMPTY_CODE_SMELL;
+    codeSmell = !coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length && previousMerged
+      ? { issues: mergeIssuesByReanalyze(previousMerged.codeSmell.issues, fileSet, reanalyzedFiles, nextSmell.issues) }
+      : nextSmell;
+  }
 
-    const databaseIntel = await extractDatabaseIntelligence(cwd, inventory.files, databaseBase.ormSignals);
-    const database: DatabaseAnalysisResult = { ...databaseBase, intelligence: databaseIntel };
+  // ── Architecture / database / inventory / lint / tests ───────────────────
+  const [architectureRaw, databaseBase, inventory, lint, testsBase] = await Promise.all([
+    shallowReuse && !astDirty && previousMerged
+      ? Promise.resolve(previousMerged.architecture)
+      : timings.record('architecture', () => guarded('architecture', cwd, () => runArchitectureEngine(cwd, ast, concurrency, filteredOptions), (i) => ({ issues: [i] }))),
+    (coldStart || fileState.removedFiles || reanalyzedFiles.size > 0)
+      ? timings.record('database', async () => {
+          if (!coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length && previousMerged) {
+            const fresh = mergeDatabaseResults(
+              await runPool([...reanalyzedFiles], concurrency, (file) => Promise.resolve(runDatabaseEngineOnFile(file, contents.get(file) ?? ''))),
+            );
+            const mergedIssues = mergeIssuesByReanalyze(previousMerged.database.issues, fileSet, reanalyzedFiles, fresh.issues);
+            const ormSignals = [...new Set([...previousMerged.database.ormSignals, ...fresh.ormSignals])];
+            const rawSqlFileCount = new Set(mergedIssues.filter((i) => i.title.toLowerCase().includes('raw sql')).map((i) => normalize(i.file))).size;
+            return { issues: mergedIssues, ormSignals, rawSqlFileCount };
+          }
+          return runPool(normalizedFiles, concurrency, (file) => Promise.resolve(runDatabaseEngineOnFile(file, contents.get(file) ?? ''))).then((parts) => mergeDatabaseResults(parts));
+        })
+      : Promise.resolve(previousMerged ? previousMerged.database : { issues: [], ormSignals: [], rawSqlFileCount: 0 }),
+    timings.record('inventory', () =>
+      guarded('inventory', cwd, async () => Promise.resolve(runInventoryEngine(cwd, { profile, files: normalizedFiles, contents, sizes })),
+        (i) => ({ ...EMPTY_INVENTORY, issues: [i], profile }))),
+    options.mode === 'quick' || options.skipLint === true
+      ? Promise.resolve({ ...EMPTY_LINT, skippedReason: options.mode === 'quick' ? 'quick mode skips lint engine' : 'skipLint flag was set' })
+      : timings.record('lint', () => guarded('lint', cwd, () => runLintEngine(cwd, { budgetMs: Math.min(Math.max(options.budgetMs ?? 45_000, 15_000), 90_000) }), (i) => ({ ...EMPTY_LINT, issues: [i] }))),
+    (coldStart || fileState.removedFiles || reanalyzedFiles.size > 0)
+      ? timings.record('tests', () =>
+          guarded('tests', cwd, () => runTestEngine(cwd, normalizedFiles, config.testFileGlobs && config.testFileGlobs.length > 0 ? { testFileGlobs: config.testFileGlobs } : undefined), (i) => ({ ...EMPTY_TESTS, issues: [i] })))
+      : Promise.resolve(previousMerged ? previousMerged.tests : { ...EMPTY_TESTS }),
+  ]);
 
-    const selfCheck = await runSelfCheckEngine(cwd);
-    const lcov = await tryReadLcovSummary(cwd);
-    const testsMerged =
-      selfCheck.issues.length === 0
-        ? testsBase
-        : {
-            ...testsBase,
-            issues: [...testsBase.issues, ...selfCheck.issues],
-          };
-    const tests = lcov !== undefined ? { ...testsMerged, lcovSummary: lcov } : testsMerged;
+  const archPolicyIssues = runArchitecturePolicyEngine(cwd, config.architecturePolicy, ast.importGraph);
+  const architecture: ArchitectureScanResult = { ...architectureRaw, issues: [...architectureRaw.issues, ...archPolicyIssues] };
 
-    const polyglotIssues = await runPolyglotEngine(cwd);
-    const codeSmellMerged: CodeSmellScanResult = {
-      ...codeSmell,
-      issues: [...codeSmell.issues, ...polyglotIssues],
-    };
+  const selfCheck = await runSelfCheckEngine(cwd);
+  const lcov = await tryReadLcovSummary(cwd);
+  const testsMerged = selfCheck.issues.length === 0 ? testsBase : { ...testsBase, issues: [...testsBase.issues, ...selfCheck.issues] };
+  const tests = lcov !== undefined ? { ...testsMerged, lcovSummary: lcov } : testsMerged;
 
-    const finishedAt = new Date().toISOString();
-    const baseResult: ScanResult = {
-      cwd,
-      outDir,
-      startedAt,
-      finishedAt,
-      mode: options.mode,
-      incremental: incrementalMode,
-      online,
-      ast,
-      security,
-      dependency,
-      outdated,
-      tests,
-      database,
-      hotspots: [],
-      api,
-      env,
-      architecture,
-      performance,
-      memory,
-      codeSmell: codeSmellMerged,
-      migration,
-      inventory,
-      lint,
-      scores: defaultScores(),
-      timings: timings.timings,
-      profile,
-      totalDurationMs: Date.parse(finishedAt) - Date.parse(startedAt),
-      ...(options.budgetMs !== undefined ? { budgetMs: options.budgetMs, budgetExceeded: Date.parse(finishedAt) - Date.parse(startedAt) > options.budgetMs } : {}),
-    };
+  const polyglotIssues = await runPolyglotEngine(cwd);
+  const databaseIntel = await extractDatabaseIntelligence(cwd, inventory.files, databaseBase.ormSignals);
+  const database: DatabaseAnalysisResult = { ...databaseBase, intelligence: databaseIntel };
 
-    const enriched = enrichAllIssues(baseResult);
-    const gateThresholds = gateThresholdsFromConfig(inspectorConfigMerged);
-    const gathered = gatherAllIssues(enriched);
-    noteRawGatherIssueCount(gathered.length);
-    const piped = applyIssuePipeline(gathered, inspectorConfigMerged, cwd);
-    const trusted = deduplicateIssues(piped);
-    notePipelineAndDedupedCounts(piped.length, trusted.length);
-    const scores = computeScores(trusted, scoreMetaForScan(enriched));
-    const scoreDiagnostics = buildScoreDiagnostics(trusted);
-    const hotspots = hotspotItems(computeHotspots(trusted, enriched.api.routes));
-    const scanForDecision: ScanResult = { ...enriched, gateThresholds };
-    const productionDecision = buildProductionDecision(scanForDecision, trusted, scores);
-    const baselineFile = await loadBaselineTrusted(outDir);
-    const baselineComparison = compareTrustedToBaseline(cwd, trusted, baselineFile);
-    if (options.saveBaseline === true) {
-      await saveBaselineTrusted(outDir, trusted, cwd);
+  return {
+    ast, astAnalyses, security, dependency, outdated, migration, tests, api, env,
+    performance, memory,
+    codeSmell: { ...codeSmell, issues: [...codeSmell.issues, ...polyglotIssues] },
+    architecture, database, inventory, lint,
+  };
+}
+
+// ─── Stage 4: mergeAndScore ───────────────────────────────────────────────────
+
+export async function mergeAndScore(
+  raw: RawEngineOutput,
+  options: ScanOptions,
+  config: InspectorConfig,
+  profile: ProjectProfile,
+  metrics: ScanReportingMetrics,
+  startedAt: string,
+  prCommentScopePaths: readonly string[] | undefined,
+): Promise<ScanResult> {
+  const { cwd, outDir } = options;
+  const finishedAt = new Date().toISOString();
+
+  const baseResult: ScanResult = {
+    cwd,
+    outDir,
+    startedAt,
+    finishedAt,
+    mode: options.mode,
+    incremental: options.rescan === true ? false : options.mode === 'diff' || options.incremental,
+    online: options.mode === 'quick' ? false : options.online,
+    ast: raw.ast,
+    security: raw.security,
+    dependency: raw.dependency,
+    outdated: raw.outdated,
+    tests: raw.tests,
+    database: raw.database,
+    hotspots: [],
+    api: raw.api,
+    env: raw.env,
+    architecture: raw.architecture,
+    performance: raw.performance,
+    memory: raw.memory,
+    codeSmell: raw.codeSmell,
+    migration: raw.migration,
+    inventory: raw.inventory,
+    lint: raw.lint,
+    scores: { security: 0, performance: 0, codeQuality: 0, compliance: 0, tests: 0, productionReadiness: 0 },
+    profile,
+    ...(options.budgetMs !== undefined ? { budgetMs: options.budgetMs } : {}),
+  };
+
+  const enriched = enrichAllIssues(baseResult);
+  const gateThresholds = gateThresholdsFromConfig(config);
+  const gathered = gatherAllIssues(enriched);
+  noteRawGatherIssueCount(gathered.length, metrics);
+  const piped = applyIssuePipeline(gathered, config, cwd);
+  const trusted = deduplicateIssues(piped);
+  notePipelineAndDedupedCounts(piped.length, trusted.length, metrics);
+
+  const scores = computeScores(trusted, { testFileCount: raw.tests.testFileCount, sourceFileCount: raw.tests.sourceFileCount });
+  const scoreDiagnostics = buildScoreDiagnostics(trusted);
+  const hotspots = hotspotItems(computeHotspots(trusted, raw.api.routes));
+  const scanForDecision: ScanResult = { ...enriched, gateThresholds };
+  const productionDecision = buildProductionDecision(scanForDecision, trusted, scores);
+
+  const baselineFile = await loadBaselineTrusted(outDir);
+  const baselineComparison = compareTrustedToBaseline(cwd, trusted, baselineFile);
+  if (options.saveBaseline === true) {
+    await saveBaselineTrusted(outDir, trusted, cwd);
+  }
+  const baselineHistory = await loadBaselineHistory(outDir);
+  const totalDurationMs = Date.parse(finishedAt) - Date.parse(startedAt);
+
+  return {
+    ...scanForDecision,
+    scores,
+    scoreDiagnostics,
+    hotspots,
+    trustedIssues: trusted,
+    productionDecision,
+    totalDurationMs,
+    ...(baselineComparison !== undefined ? { baselineComparison } : {}),
+    ...(baselineHistory.length > 0 ? { baselineHistory } : {}),
+    ...(prCommentScopePaths !== undefined ? { prCommentScopePaths } : {}),
+    ...(options.budgetMs !== undefined
+      ? { budgetMs: options.budgetMs, budgetExceeded: totalDurationMs > options.budgetMs }
+      : {}),
+  };
+}
+
+// ─── Stage 5: persistAndWrite ─────────────────────────────────────────────────
+
+export async function persistAndWrite(
+  result: ScanResult,
+  options: ScanOptions,
+  fileState: FileState,
+  astAnalyses: readonly FileAstAnalysis[],
+  previousMerged: ScanResult | undefined,
+  metrics: ScanReportingMetrics,
+  timings: TimingsRecorder,
+): Promise<void> {
+  const { outDir, cwd } = options;
+  const { normalizedFiles, currentHashes, envSnapshotNow, dependencySnapshotNow, cacheMode, reanalyzedFiles, contents } = fileState;
+
+  activateScanMetrics(metrics);
+
+  const redactedResult = redactScanResultForStorage(result);
+  const touchedSections = computeTouchedSections({
+    coldStart: cacheMode === 'cold-start',
+    hadRemovedFiles: fileState.removedFiles,
+    astDirty: cacheMode !== 'shallow-reuse',
+    depDirty: fileState.dependencyDirty,
+    envDirty: fileState.envDirty,
+    partialFilesChanged: reanalyzedFiles.size > 0,
+    mode: options.mode,
+  });
+
+  if (cacheMode === 'incremental' || cacheMode === 'shallow-reuse') {
+    await writeScanReportsPartial(touchedSections, redactedResult, outDir);
+  } else {
+    await writeScanReports(redactedResult, outDir);
+  }
+  await writeScanArtifacts(redactedResult, outDir);
+
+  if (dependencySnapshotNow !== null) {
+    await saveDependencySnapshot(outDir, dependencySnapshotNow);
+  }
+  await saveFileHashes(outDir, currentHashes);
+  await saveEnvSnapshot(outDir, envSnapshotNow);
+
+  // ── Content bundle with 20 MB memory cap ──────────────────────────────
+  const contentBundle: Record<string, string> = {};
+  let bundleBytes = 0;
+  let skippedCount = 0;
+  for (const file of normalizedFiles) {
+    const content = contents.get(file) ?? '';
+    bundleBytes += content.length;
+    if (bundleBytes > MAX_BUNDLE_BYTES) {
+      skippedCount += 1;
+      continue;
     }
-    const baselineHistory = await loadBaselineHistory(outDir);
-    const result: ScanResult = {
-      ...scanForDecision,
-      scores,
-      scoreDiagnostics,
-      hotspots,
-      trustedIssues: trusted,
-      productionDecision,
-      ...(baselineComparison !== undefined ? { baselineComparison } : {}),
-      ...(baselineHistory.length > 0 ? { baselineHistory } : {}),
-      ...(prCommentScopePaths !== undefined ? { prCommentScopePaths } : {}),
-    };
+    contentBundle[relKey(cwd, file)] = content;
+  }
+  if (skippedCount > 0) {
+    logger.warn({ skipped: skippedCount }, 'content bundle capped at 20 MB — some files excluded from offline chat');
+  }
+  await saveFileContentsBundle(outDir, contentBundle);
 
-    const redactedResult = redactScanResultForStorage(result);
-    const touchedSections = computeTouchedSections({
-      coldStart,
-      hadRemovedFiles: removedFiles,
-      astDirty,
-      depDirty: dependencyDirty,
-      envDirty,
-      partialFilesChanged: reanalyzedFiles.size > 0,
-      mode: options.mode,
-    });
+  if (astAnalyses.length > 0) {
+    await saveAstByFileMap(outDir, cwd, astAnalyses);
+  }
 
-    if (cacheMode === 'incremental' || cacheMode === 'shallow-reuse') {
-      await writeScanReportsPartial(touchedSections, redactedResult, outDir);
-    } else {
-      await writeScanReports(redactedResult, outDir);
+  // Only persist merged scan when content changed (lightweight fingerprint).
+  const prevFp = previousMerged !== undefined ? scanFingerprint(previousMerged) : undefined;
+  const nextFp = scanFingerprint(result);
+  if (prevFp !== nextFp) {
+    await saveMergedScan(outDir, redactedResult);
+  }
+
+  const finishedAt = result.finishedAt;
+  await saveScanMeta(outDir, {
+    version: 1,
+    lastScanAt: finishedAt,
+    ...(result.totalDurationMs !== undefined ? { lastScanDurationMs: result.totalDurationMs } : {}),
+    cacheHit: false,
+  });
+  await clearScanInterruptedMarker(outDir);
+
+  void timings;
+}
+
+// ─── runScan coordinator (≤ 60 lines) ────────────────────────────────────────
+
+export async function runScan(options: ScanOptions): Promise<ScanResult> {
+  const cwd = resolve(options.cwd);
+  const outDir = resolve(options.outDir);
+  const resolvedOptions: ScanOptions = { ...options, cwd, outDir, concurrency: Math.max(1, options.concurrency) };
+  const startedAt = new Date().toISOString();
+  const timings = createTimingsRecorder();
+  const metrics = createScanMetrics();
+
+  await mkdir(outDir, { recursive: true });
+
+  const handleSignal = (): void => { void writeScanInterruptedMarker(outDir); };
+  process.on('SIGINT', handleSignal);
+  process.on('SIGTERM', handleSignal);
+
+  try {
+    const progress = new ScanProgress(0);
+    const status = (msg: string): void => { progress.status(msg); logger.debug(msg); };
+
+    status('Loading cache...');
+    const cache = await resolveCache(resolvedOptions);
+
+    status('Discovering files...');
+    const fileState = await discoverAndHash(resolvedOptions, cache, timings);
+
+    const profile: ProjectProfile = await timings.record('profile', () => detectProjectProfile(cwd));
+    const inspectorConfig = await mergePolicyPack(cwd, await loadInspectorConfig(cwd));
+    const pluginSuppress = await collectPluginSuppressPatterns(cwd);
+    const config: InspectorConfig = { ...inspectorConfig, suppressTitleSubstrings: [...inspectorConfig.suppressTitleSubstrings, ...pluginSuppress] };
+
+    const prCommentScopePaths = await resolvePrCommentScope(resolvedOptions, cwd);
+
+    // Fast path: full cache reuse
+    if (fileState.cacheMode === 'full-reuse' && cache.previousMerged !== undefined) {
+      status('Using cached result...');
+      const polyglotIssues = await runPolyglotEngine(cwd);
+      const previousWithPoly = { ...cache.previousMerged, codeSmell: { ...cache.previousMerged.codeSmell, issues: [...cache.previousMerged.codeSmell.issues, ...polyglotIssues] } };
+      const enriched = enrichAllIssues({ ...previousWithPoly, startedAt, finishedAt: new Date().toISOString(), profile });
+      const gathered = gatherAllIssues(enriched);
+      noteRawGatherIssueCount(gathered.length, metrics);
+      const piped = applyIssuePipeline(gathered, config, cwd);
+      const trusted = deduplicateIssues(piped);
+      notePipelineAndDedupedCounts(piped.length, trusted.length, metrics);
+      activateScanMetrics(metrics);
+      const scores = computeScores(trusted, { testFileCount: enriched.tests.testFileCount, sourceFileCount: enriched.tests.sourceFileCount });
+      const gateThresholds = gateThresholdsFromConfig(config);
+      const productionDecision = buildProductionDecision({ ...enriched, gateThresholds }, trusted, scores);
+      const baselineFile = await loadBaselineTrusted(outDir);
+      const baselineComparison = compareTrustedToBaseline(cwd, trusted, baselineFile);
+      const baselineHistory = await loadBaselineHistory(outDir);
+      const reused: ScanResult = { ...enriched, gateThresholds, scores, scoreDiagnostics: buildScoreDiagnostics(trusted), hotspots: hotspotItems(computeHotspots(trusted, enriched.api.routes)), trustedIssues: trusted, productionDecision, ...(baselineComparison !== undefined ? { baselineComparison } : {}), ...(baselineHistory.length > 0 ? { baselineHistory } : {}), ...(prCommentScopePaths !== undefined ? { prCommentScopePaths } : {}) };
+      await writeScanArtifacts(reused, outDir);
+      await saveScanMeta(outDir, { version: 1, lastScanAt: reused.finishedAt, lastScanDurationMs: 0, cacheHit: true });
+      await clearScanInterruptedMarker(outDir);
+      progress.complete();
+      return reused;
     }
 
-    if (dependencySnapshotNow !== null) {
-      await saveDependencySnapshot(outDir, dependencySnapshotNow);
-      await writeFile(join(outDir, '.cache', 'dep-snapshot.json'), `${JSON.stringify(dependencySnapshotNow, null, 2)}\n`, 'utf8');
-    }
-    await saveFileHashes(outDir, currentHashes);
-    await saveEnvSnapshot(outDir, envSnapshotNow);
+    status('Running engines...');
+    const raw = await runEngines(resolvedOptions, fileState, cache, config, profile, timings, status);
 
-    const contentBundle: Record<string, string> = {};
-    for (const file of normalizedFiles) {
-      contentBundle[relKey(cwd, file)] = contents.get(file) ?? '';
-    }
-    await saveFileContentsBundle(outDir, contentBundle);
-    if (astAnalyses.length > 0) {
-      await saveAstByFileMap(outDir, cwd, astAnalyses);
-    }
+    status('Evaluating production readiness...');
+    const result = await mergeAndScore(raw, resolvedOptions, config, profile, metrics, startedAt, prCommentScopePaths);
+    const finalResult: ScanResult = { ...result, timings: timings.timings };
 
-    const previousMergedHash = previousMerged === undefined ? undefined : hashObject(redactScanResultForStorage(previousMerged));
-    const nextMergedHash = hashObject(redactedResult);
-    if (previousMergedHash !== nextMergedHash) {
-      await saveMergedScan(outDir, redactedResult);
-    }
+    await persistAndWrite(finalResult, resolvedOptions, fileState, raw.astAnalyses, cache.previousMerged, metrics, timings);
 
-    await saveScanMeta(outDir, {
-      version: 1,
-      lastScanAt: finishedAt,
-      ...(redactedResult.totalDurationMs !== undefined
-        ? { lastScanDurationMs: redactedResult.totalDurationMs }
-        : {}),
-      cacheHit: false,
-    });
-    await clearScanInterruptedMarker(outDir);
-    return redactedResult;
+    progress.complete();
+    return finalResult;
   } finally {
-    process.removeListener('SIGINT', handleSigInt);
+    process.off('SIGINT', handleSignal);
+    process.off('SIGTERM', handleSignal);
   }
 }
 
