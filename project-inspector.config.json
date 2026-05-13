@@ -1,0 +1,29 @@
+{
+  "$schema": "./schemas/inspector-config.schema.json",
+  "version": 1,
+  "gates": {
+    "minProductionReadiness": 48,
+    "minSecurityScore": 50
+  },
+  "suppressTitleSubstrings": [],
+  "suppressIssueIds": [],
+  "excludeLowConfidence": false,
+  "ignorePathGlobs": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/.next/**",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.test.js",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/*.spec.js",
+    "**/__tests__/**",
+    "**/e2e/**",
+    "**/__mocks__/**"
+  ],
+  "intentionalPublicRouteGlobs": [],
+  "testFileGlobs": []
+}

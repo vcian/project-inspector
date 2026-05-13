@@ -127,6 +127,7 @@ const NEST_HTTP: Readonly<Record<string, string>> = {
   Delete: 'DELETE',
   Options: 'OPTIONS',
   Head: 'HEAD',
+  All: 'ALL',
 };
 
 function fileUsesCommander(text: string): boolean {
@@ -167,6 +168,17 @@ function scanCommanderSubcommands(path: string, text: string, routes: ApiRouteIn
   }
 }
 
+function extractControllerPrefix(text: string): string {
+  // @Controller('prefix') or @Controller("prefix")
+  const strMatch = text.match(/@Controller\s*\(\s*['"]([^'"]*)['"]\s*\)/);
+  if (strMatch?.[1] != null) return strMatch[1].replace(/^\/+|\/+$/g, '');
+  // @Controller({ path: 'prefix' })
+  const objMatch = text.match(/@Controller\s*\(\s*\{[^}]*path\s*:\s*['"]([^'"]*)['"]/);
+  if (objMatch?.[1] != null) return objMatch[1].replace(/^\/+|\/+$/g, '');
+  // @Controller() with no arg — prefix is ''
+  return '';
+}
+
 function scanNestControllerRoutes(
   path: string,
   text: string,
@@ -177,13 +189,16 @@ function scanNestControllerRoutes(
   if (!/@Controller\b/.test(text)) {
     return;
   }
-  const ctrl = text.match(/@Controller\s*\(\s*['"]([^'"]*)['"]\s*\)/);
-  const prefix = (ctrl?.[1] ?? '').replace(/^\/+|\/+$/g, '');
+  // Skip test / spec files — mock routes inflate counts
+  if (/\.(spec|test)\.(ts|js)$/.test(path)) {
+    return;
+  }
+  const prefix = extractControllerPrefix(text);
   const lines = text.split(/\r?\n/);
   const fileHasClassValidator = /\bclass-validator\b/.test(text);
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? '';
-    const m = line.match(/@(Get|Post|Put|Patch|Delete|Options|Head)\s*\(\s*(?:['"]([^'"]*)['"])?\s*\)/);
+    const m = line.match(/@(Get|Post|Put|Patch|Delete|Options|Head|All)\s*\(\s*(?:['"]([^'"]*)['"])?\s*\)/);
     if (!m?.[1]) {
       continue;
     }
@@ -343,8 +358,11 @@ async function analyzeApiFile(
     }
   };
 
-  scanRegex(new RegExp(EXPRESS_METHODS.source, 'g'), 'express');
-  scanRegex(new RegExp(FASTIFY_METHODS.source, 'g'), 'fastify');
+  // Skip test/spec files for Express/Fastify scanning too
+  if (!/\.(spec|test)\.(ts|js)$/.test(path)) {
+    scanRegex(new RegExp(EXPRESS_METHODS.source, 'g'), 'express');
+    scanRegex(new RegExp(FASTIFY_METHODS.source, 'g'), 'fastify');
+  }
 
   if (nestEnabled && /\.(ts|tsx)$/.test(path)) {
     scanNestControllerRoutes(path, text, routes, issues, configuredPublicPatterns);
@@ -428,7 +446,17 @@ export async function runApiEngine(cwd: string, concurrency: number, options?: A
   const results = await runPool(targets, concurrency, (f) =>
     analyzeApiFile(f, getText, nestEnabled, configuredPublicPatterns),
   );
-  const routes = results.flatMap((r) => r.routes);
+  const allRoutes = results.flatMap((r) => r.routes);
   const issues = results.flatMap((r) => r.issues);
+
+  // Deduplicate: same method + path + file + line = same route
+  const seen = new Set<string>();
+  const routes = allRoutes.filter((r) => {
+    const key = `${r.method}|${r.pathPattern}|${r.file}|${String(r.line)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   return { routes, issues };
 }

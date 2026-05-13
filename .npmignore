@@ -1,0 +1,10 @@
+src/
+scripts/
+*.test.ts
+*.test.js
+.cache/
+coverage/
+AUDIT_REPORT.md
+tsconfig*.json
+eslint.config.*
+.eslintignore

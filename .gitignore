@@ -4,3 +4,15 @@ project-report/
 tmp-pi-report/
 *.log
 .DS_Store
+*.tsbuildinfo
+.cache/
+coverage/
+lcov.info
+.env
+.env.*
+!.env.example
+Thumbs.db
+*.bak
+*.orig
+*.copy.ts
+packages/*/node_modules/

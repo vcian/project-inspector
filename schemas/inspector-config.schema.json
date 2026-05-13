@@ -1,0 +1,151 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/project-inspector/schemas/inspector-config.schema.json",
+  "title": "InspectorConfig",
+  "description": "project-inspector.config.json — optional config file in your project root.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version. Must be 1."
+    },
+    "ignorePathGlobs": {
+      "type": "array",
+      "description": "Glob patterns (forward slashes) relative to project root. Matched files are excluded from trusted findings.",
+      "items": { "type": "string" },
+      "default": [
+        "**/node_modules/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/coverage/**",
+        "**/.next/**",
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.test.js",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/*.spec.js",
+        "**/__tests__/**",
+        "**/e2e/**",
+        "**/__mocks__/**"
+      ]
+    },
+    "suppressIssueIds": {
+      "type": "array",
+      "description": "Exact Issue.id values to drop from trusted output.",
+      "items": { "type": "string" }
+    },
+    "suppressTitleSubstrings": {
+      "type": "array",
+      "description": "Case-insensitive substrings of Issue.title — any matching issue is dropped from trusted output.",
+      "items": { "type": "string" }
+    },
+    "excludeLowConfidence": {
+      "type": "boolean",
+      "description": "When true, findings with confidence='low' are excluded from scoring and decision output.",
+      "default": false
+    },
+    "gates": {
+      "type": "object",
+      "description": "CI / decision gate thresholds (0–100). Scan fails if scores fall below these.",
+      "additionalProperties": false,
+      "properties": {
+        "minProductionReadiness": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Minimum production readiness score (0–100). Default: 48."
+        },
+        "minSecurityScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Minimum security score (0–100). Default: 50."
+        }
+      }
+    },
+    "testFileGlobs": {
+      "type": "array",
+      "description": "Extra fast-glob patterns (relative to project root) counted as test files, in addition to built-in defaults.",
+      "items": { "type": "string" }
+    },
+    "intentionalPublicRouteGlobs": {
+      "type": "array",
+      "description": "Route path patterns treated as intentionally public for API auth heuristics. Supports * wildcards.",
+      "items": { "type": "string" },
+      "examples": ["/public/*", "/auth/login", "/webhooks/*"]
+    },
+    "governanceSuppressions": {
+      "type": "array",
+      "description": "Structured suppressions with owner, reason, and expiry (governance-audit trail).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reason", "owner", "expiresAt"],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Human-readable justification for the suppression."
+          },
+          "owner": {
+            "type": "string",
+            "description": "Team or person accountable for this suppression (e.g. 'security-team' or 'alice@example.com')."
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 instant after which this suppression is automatically ignored."
+          },
+          "issueId": {
+            "type": "string",
+            "description": "Exact Issue.id to suppress."
+          },
+          "titleSubstring": {
+            "type": "string",
+            "description": "Case-insensitive substring of Issue.title to suppress."
+          },
+          "pathGlob": {
+            "type": "string",
+            "description": "Glob pattern matching Issue.file paths to suppress."
+          }
+        }
+      }
+    },
+    "architecturePolicy": {
+      "type": "object",
+      "description": "Import-layer rules — forbid specific import patterns between layers.",
+      "additionalProperties": false,
+      "properties": {
+        "forbid": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fromPathGlob", "importGlob"],
+            "properties": {
+              "fromPathGlob": {
+                "type": "string",
+                "description": "Glob pattern for source files that should not import matching modules."
+              },
+              "importGlob": {
+                "type": "string",
+                "description": "Glob pattern for import paths that are forbidden from matching source files."
+              },
+              "message": {
+                "type": "string",
+                "description": "Optional custom message shown when the rule is violated."
+              }
+            }
+          }
+        }
+      }
+    },
+    "policyPack": {
+      "type": "string",
+      "description": "Optional policy pack id — loads packs/<id>.json and merges extra suppressions / ignore globs."
+    }
+  }
+}

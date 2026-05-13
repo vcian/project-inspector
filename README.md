@@ -1,14 +1,15 @@
 # project-inspector
 
 Deterministic, offline-first static analysis for Node.js and TypeScript ecosystems.  
-`project-inspector` scans source code, lockfiles, and project structure to generate production-focused reports for security, architecture, dependencies, API exposure, performance, and release readiness.
+`project-inspector` scans source code, lockfiles, and project structure to generate production-focused reports for security, architecture, dependencies, API exposure, performance, and release readiness — delivered as a single self-contained interactive HTML dashboard and machine-readable artifacts.
 
 ## Why use this
 
 - Fast local feedback for engineering and AppSec review.
 - Stable, deterministic output suitable for CI gates and trend tracking.
 - Zero LLM dependency; works in restricted or disconnected environments.
-- Produces both human-readable reports and machine-readable artifacts (`json`, `sarif`).
+- Produces an interactive HTML dashboard, Markdown reports, and machine-readable artifacts (`json`, `sarif`).
+- No CDN dependencies — the HTML report is fully self-contained and works offline.
 
 ## Core capabilities
 
@@ -18,7 +19,21 @@ Deterministic, offline-first static analysis for Node.js and TypeScript ecosyste
 - API surface discovery (HTTP + CLI command heuristics).
 - Performance and memory anti-pattern detection.
 - Inventory and project topology mapping.
+- Database schema intelligence — ER diagram with entity/relation visualization.
 - CI gate verdict via `check`.
+
+## Interactive HTML dashboard
+
+Every scan produces `project-report/index.html` — a single-file, fully offline HTML report with the following tabs:
+
+| Tab | Content |
+|-----|---------|
+| **Issues** | Full findings table with severity badges, filters, owner, fix guidance, and compliance tags |
+| **Bundle** | All generated report files with inline Markdown and JSON preview, syntax-highlighted |
+| **Architecture** | Data-flow pipeline diagram, framework detection, architecture issues list |
+| **Database** | Auto-detected ER diagram (Collections for Mongoose, Tables for SQL/Prisma/TypeORM/Drizzle/Sequelize), relations, indexing hints, schema model cards |
+
+The dashboard requires no server — open it directly in a browser.
 
 ## Supported ecosystems
 
@@ -26,6 +41,8 @@ Deterministic, offline-first static analysis for Node.js and TypeScript ecosyste
 - React / Next.js
 - Express / Fastify
 - Heuristic NestJS support
+- MongoDB / Mongoose (Collection-level ER diagram and relation detection)
+- SQL databases via Prisma, TypeORM, Drizzle ORM, Sequelize, or raw `.sql` DDL
 - Monorepo and multi-project workspace detection (heuristic)
 
 ## Install
@@ -50,6 +67,17 @@ project-inspector scan
 ```
 
 Default output directory: `./project-report`
+
+Open the report:
+
+```bash
+# macOS
+open project-report/index.html
+# Windows
+start project-report/index.html
+# Linux
+xdg-open project-report/index.html
+```
 
 ## CLI commands
 
@@ -161,35 +189,31 @@ project-inspector scan --offline
 
 ## Output files
 
-Reports are consolidated:
-
-- `security.md` contains security findings + OWASP drill-down + cross-engine hotspots + threat scenarios.
-- `performance.md` includes memory engine signals.
-- `dependencies.md` includes migration hints.
-- Legacy standalone files (`compliance.md`, `hotspots.md`, `attack-scenarios.md`, `memory.md`, `migration.md`) are removed on next write.
+Security findings, performance signals, dependency analysis, and hotspots are all embedded inside `audit-summary.md`, `action-plan.md`, and the `index.html` dashboard — there are no separate `security.md` / `performance.md` files.
 
 | Path | Content |
 |------|---------|
-| `project-report/summary.md` | Executive summary and report index |
-| `project-report/security.md` | Security findings, OWASP mapping, hotspots, threat scenarios |
-| `project-report/production-decision.md` | Human-readable production verdict |
-| `project-report/decision.json` | Machine-readable verdict for CI automation |
-| `project-report/scores.json` | Numeric scores + segment rollup when present |
-| `project-report/openapi.json` | OpenAPI **3.1** export from detected HTTP routes |
-| `project-report/sbom.cdx.json` | CycloneDX SBOM from npm lockfile |
-| `project-report/osv-summary.json` | OSV vulnerability hints (skipped when offline) |
-| `project-report/pr-comment.md` | GitHub-style Markdown for PR comments / job summaries |
-| `project-report/governance-suppressions.json` | Snapshot of governance suppressions |
-| `project-report/governance-audit.jsonl` | Append-only audit entries per scan |
-| `docs/rules-catalog.md` | Generated rules catalog (`npm run docs:catalog`) |
-| `project-report/inventory.json` | File-level inventory with kind/framework/LOC/bytes |
-| `project-report/results.json` | Present when `--format json` is used |
-| `project-report/results.sarif` | Present when `--format sarif` is used (SARIF 2.1.0) |
-| `project-report/ci-result.json` | Written by `check` command |
-| `project-report/.cache/merged-scan.json` | Cached merged payload for partial refresh |
-| `project-report/.cache/file-hashes.json` | SHA-256 hash map for incremental scans |
-| `project-report/.cache/dependency-snapshot.json` | Dependency/lockfile fingerprint (includes vuln DB fingerprint) |
-| `project-report/.cache/vuln-db-meta.json` | Metadata about last vuln DB fetch and staleness |
+| `project-report/index.html` | **Interactive HTML dashboard** (Issues, Bundle, Architecture, Database tabs) |
+| `project-report/action-plan.md` | Prioritized remediation checklist with owner assignments and ETAs |
+| `project-report/audit-summary.md` | GitHub-style Markdown summary for PR comments and job summaries |
+| `project-report/api.md` | API surface review — route matrix, auth/validation coverage, endpoint access |
+| `project-report/architecture.md` | Architecture analysis, module-to-datastore map, API-to-DB flow, structural issues |
+| `project-report/database.md` | Database schema analysis, ER relations, indexing hints, ORM findings |
+| `project-report/decision.json` | Machine-readable production verdict and gate status for CI automation |
+| `project-report/scores.json` | Numeric scores across all axes plus segment rollup |
+| `project-report/openapi.json` | OpenAPI **3.1** export auto-generated from detected HTTP routes |
+| `project-report/sbom.cdx.json` | CycloneDX **1.5** SBOM from npm lockfile |
+| `project-report/governance-suppressions.json` | Snapshot of active governance suppressions |
+| `project-report/results.sarif` | SARIF **2.1.0** report (always written) |
+| `project-report/results.json` | Full scan result as JSON — only written with `--format json` |
+| `project-report/ci-result.json` | Gate verdict written by the `check` command |
+| `project-report/.cache/merged-scan.json` | Cached full scan payload for partial/incremental refresh |
+| `project-report/.cache/file-hashes.json` | SHA-256 hash map for incremental file-change detection |
+| `project-report/.cache/dependency-snapshot.json` | Dependency and lockfile fingerprint (includes vuln DB hash) |
+| `project-report/.cache/scan-meta.json` | Scan metadata and per-engine timing |
+| `project-report/.cache/vuln-db-meta.json` | Metadata about the last vuln DB fetch and staleness state |
+| `project-report/.cache/env-snapshot.json` | Environment variable key snapshot for drift detection |
+| `docs/rules-catalog.md` | Generated rules catalog — run `npm run docs:catalog` to refresh |
 
 ## CI integration
 
@@ -267,6 +291,7 @@ Use findings as high-signal review inputs, then confirm in code review or target
 - NestJS route/auth/validation classification is decorator-oriented heuristic analysis.
 - Supply-chain insight combines offline rules with optional `npm audit` in `--online` mode.
 - Multi-project auto-detection is heuristic when no explicit workspace config exists.
+- Mongoose schema detection covers `mongoose.Schema`, `new Schema()`, and `mongoose.model()` patterns; non-standard schema factory wrappers may not be captured.
 
 ## Performance and determinism notes
 
@@ -281,12 +306,16 @@ Use findings as high-signal review inputs, then confirm in code review or target
 
 | Script | Description |
 |--------|-------------|
-| `npm run build` | Compile TypeScript to `dist/` |
+| `npm run build` | Compile TypeScript to `dist/` (runs build verification post-step) |
 | `npm run dev` | Run CLI entry in dev mode using `tsx` |
-| `npm run typecheck` | TypeScript strict type check |
+| `npm run typecheck` | TypeScript strict type check (no emit) |
 | `npm run lint` | ESLint with zero warnings |
-| `npm test` | Node test runner for configured test files |
+| `npm test` | Node test runner for all configured test files |
+| `npm run test:coverage` | Test suite with lcov + text coverage via `c8` |
+| `npm run ci` | Full local CI gate: typecheck + lint + test |
+| `npm run clean` | Remove `dist/` directory |
 | `npm run refresh-majors` | Refresh curated package major-version metadata (network required) |
+| `npm run docs:catalog` | Generate `docs/rules-catalog.md` from engine rule definitions |
 
 ### Node version
 
@@ -300,6 +329,7 @@ Use findings as high-signal review inputs, then confirm in code review or target
 - Track `scores.json` and `decision.json` over time for trend baselining.
 - Use `--rescan` for release branches and major refactors.
 - Keep `VULN_DB_URL` fresh if using private override intelligence.
+- Open `project-report/index.html` locally for the full interactive dashboard view.
 
 ## Open-source governance
 
