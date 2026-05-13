@@ -122,7 +122,7 @@ export async function runEnvEngine(cwd: string, options?: EnvEngineOptions): Pro
   const usedKeys = await collectProcessEnvKeys(root, options?.getSourceText, options?.sourceFiles);
   let unusedCap = 0;
   for (const k of keysFound) {
-    if (!usedKeys.has(k) && unusedCap < 12) {
+    if (!usedKeys.has(k) && unusedCap < 6) {
       unusedCap += 1;
       issues.push(
         mkIssue(
@@ -131,9 +131,9 @@ export async function runEnvEngine(cwd: string, options?: EnvEngineOptions): Pro
           `Possibly unused environment variable: ${k}`,
           join(root, '.env'),
           1,
-          `Key "${k}" was not referenced as process.env.${k} in scanned sources (heuristic).`,
-          'Noise in configuration; may still be used by tooling.',
-          'Remove unused keys or document external consumers.',
+          `Key "${k}" was not found via process.env.${k}, configService.get('${k}'), or similar patterns in scanned sources. May still be consumed by external tooling or a framework config loader.`,
+          'Noise in configuration; may still be used by tooling or framework (e.g. NestJS ConfigModule).',
+          'Remove unused keys or add a comment documenting the external consumer.',
         ),
       );
     }
@@ -190,7 +190,16 @@ async function collectProcessEnvKeys(
   sourceFiles?: readonly string[],
 ): Promise<Set<string>> {
   const keys = new Set<string>();
-  const re = /process\.env\.([A-Z0-9_]+)/g;
+  // Covers: process.env.KEY, process.env['KEY'], configService.get('KEY'),
+  // configService.get<T>('KEY'), configService.getOrThrow('KEY'),
+  // this.configService.get('KEY'), registerAs namespace strings, etc.
+  const patterns = [
+    /process\.env\.([A-Z][A-Z0-9_]*)/g,
+    /process\.env\[['"]([A-Z][A-Z0-9_]*)['"]]/g,
+    /\.get(?:OrThrow)?(?:<[^>]*>)?\(\s*['"]([A-Z][A-Z0-9_]*)['"]/g,
+    /injectToken\s*\(\s*['"]([A-Z][A-Z0-9_]*)['"]/g,
+    /process\.env\b.*?\b([A-Z][A-Z0-9_]{2,})/g,
+  ];
   const files =
     sourceFiles && sourceFiles.length > 0 ? [...sourceFiles] : await discoverSourceFiles(cwd);
   for (const f of files) {
@@ -202,14 +211,13 @@ async function collectProcessEnvKeys(
         continue;
       }
     }
-    let m: RegExpExecArray | null;
-    for (;;) {
-      m = re.exec(text);
-      if (m === null) {
-        break;
-      }
-      if (m[1]) {
-        keys.add(m[1]);
+    for (const re of patterns) {
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      for (;;) {
+        m = re.exec(text);
+        if (m === null) break;
+        if (m[1]) keys.add(m[1]);
       }
     }
   }

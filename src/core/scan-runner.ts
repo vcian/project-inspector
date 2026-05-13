@@ -357,6 +357,7 @@ export async function discoverAndHash(
   options: ScanOptions,
   cache: CacheState,
   timings: TimingsRecorder,
+  progress?: ScanProgress,
 ): Promise<FileState> {
   const { cwd, outDir, concurrency } = options;
   const incrementalMode = options.rescan === true ? false : options.mode === 'diff' || options.incremental;
@@ -364,15 +365,16 @@ export async function discoverAndHash(
   const sourceFiles = await timings.record('discover-files', () => discoverSourceFiles(cwd));
   const normalizedFiles = sourceFiles.map((file) => normalize(file));
   const fileSet = new Set<string>(normalizedFiles);
+  const n = normalizedFiles.length;
 
-  const progress = new ScanProgress(normalizedFiles.length);
+  // Phase 1 — Hashing  (global 0 → 20%)
+  progress?.beginPhase('Hashing', n, 0, 20);
   const hashPairs = await timings.record('file-hashes', () =>
     runPool(normalizedFiles, Math.max(1, concurrency), async (file) => {
-      progress.tick(file);
+      progress?.tick(file);
       return [relKey(cwd, file), await sha256File(file)] as const;
     }),
   );
-  progress.complete();
 
   const currentHashes: Record<string, string> = Object.fromEntries(hashPairs);
   const { previousHashes, previousMerged, coldStart, previousContents } = cache;
@@ -443,8 +445,11 @@ export async function discoverAndHash(
   const contents = new Map<string, string>();
   const sizes = new Map<string, number>();
   if (!fullReuse) {
+    // Phase 2 — Reading file contents  (global 20 → 40%)
+    progress?.beginPhase('Reading', n, 20, 40);
     await timings.record('read-files', () =>
       runPool(normalizedFiles, Math.max(1, concurrency), async (file) => {
+        progress?.tick(file);
         const key = relKey(cwd, file);
         const cached = previousContents?.[key];
         const unchanged = !coldStart && previousHashes[key] === currentHashes[key];
@@ -495,6 +500,7 @@ export async function runEngines(
   profile: ProjectProfile,
   timings: TimingsRecorder,
   statusFn: (msg: string) => void,
+  progress?: ScanProgress,
 ): Promise<RawEngineOutput> {
   const { cwd, concurrency } = options;
   const { normalizedFiles, fileSet, reanalyzedFiles, contents, sizes, cacheMode, dependencyDirty, diffFilter } = fileState;
@@ -514,8 +520,15 @@ export async function runEngines(
   const astOptions: AstEngineOptions = { ...filteredOptions, ...(diffFilter ? { partial: true } : {}), morph };
   const securityOptions: SecurityEngineOptions = { ...filteredOptions, morph, profile };
 
+  const n = normalizedFiles.length;
+  // Phases 3–7 live in the 40–90% global range via progress.status(msg, jumpTo).
+  const stat = (msg: string, jumpTo?: number): void => {
+    if (progress) { progress.status(msg, jumpTo); } else { statusFn(msg); }
+    logger.debug(msg);
+  };
+
   // ── AST ──────────────────────────────────────────────────────────────────
-  statusFn('Analyzing code structure...');
+  stat(`Analyzing code structure (${String(n)} files)...`, 42);
   const astRun = (override?: Partial<AstEngineOptions>): Promise<AstEngineRun> =>
     guarded('ast', cwd, () => runAstEngineWithAnalyses(cwd, concurrency, { ...astOptions, ...override }), (issue) => ({
       analyses: [], scan: { filesAnalyzed: 0, functions: [], issues: [issue], importGraph: [], circularDependencyChains: [] },
@@ -537,7 +550,7 @@ export async function runEngines(
   }
 
   // ── Security ─────────────────────────────────────────────────────────────
-  statusFn('Scanning security patterns...');
+  stat(`Scanning security patterns (${String(n)} files)...`, 50);
   let security: SecurityScanResult;
   if (shallowReuse) {
     security = previousMerged ? previousMerged.security : { issues: [] };
@@ -553,7 +566,7 @@ export async function runEngines(
   }
 
   // ── Dependency / outdated / migration ────────────────────────────────────
-  statusFn('Checking dependencies...');
+  stat('Checking dependencies...', 57);
   const [dependency, outdated, migration] = await Promise.all([
     dependencyDirty
       ? timings.record('dependency', () => guarded('dependency', cwd, () => runDependencyEngine(cwd, online, { reportOutDir: options.outDir, offline: options.offline === true }), (i): DependencyScanResult => ({ issues: [i], lockfileKind: 'none', directDependencyCount: 0 })))
@@ -567,7 +580,7 @@ export async function runEngines(
   ]);
 
   // ── Parallel engines ─────────────────────────────────────────────────────
-  statusFn('Mapping API surface...');
+  stat(`Mapping API surface + performance (${String(n)} files)...`, 62);
   type NamedTask = { readonly name: string; readonly work: () => Promise<unknown> };
   const groupedTasks: NamedTask[] = [];
 
@@ -595,7 +608,7 @@ export async function runEngines(
     );
   }
 
-  statusFn('Computing architecture graph...');
+  stat('Computing architecture graph...', 64);
   const taskResultsArr = groupedTasks.length > 0
     ? await timings.record('parallel-engines', () => runPool(groupedTasks, Math.min(concurrency, groupedTasks.length), async (task) => [task.name, await task.work()] as const))
     : [];
@@ -635,15 +648,19 @@ export async function runEngines(
     (coldStart || fileState.removedFiles || reanalyzedFiles.size > 0)
       ? timings.record('database', async () => {
           if (!coldStart && reanalyzedFiles.size > 0 && reanalyzedFiles.size < normalizedFiles.length && previousMerged) {
+            const dbFiles = [...reanalyzedFiles];
+            progress?.beginPhase('Database', dbFiles.length, 65, 90);
             const fresh = mergeDatabaseResults(
-              await runPool([...reanalyzedFiles], concurrency, (file) => Promise.resolve(runDatabaseEngineOnFile(file, contents.get(file) ?? ''))),
+              await runPool(dbFiles, concurrency, (file) => { progress?.tick(file); return Promise.resolve(runDatabaseEngineOnFile(file, contents.get(file) ?? '')); }),
             );
             const mergedIssues = mergeIssuesByReanalyze(previousMerged.database.issues, fileSet, reanalyzedFiles, fresh.issues);
             const ormSignals = [...new Set([...previousMerged.database.ormSignals, ...fresh.ormSignals])];
             const rawSqlFileCount = new Set(mergedIssues.filter((i) => i.title.toLowerCase().includes('raw sql')).map((i) => normalize(i.file))).size;
             return { issues: mergedIssues, ormSignals, rawSqlFileCount };
           }
-          return runPool(normalizedFiles, concurrency, (file) => Promise.resolve(runDatabaseEngineOnFile(file, contents.get(file) ?? ''))).then((parts) => mergeDatabaseResults(parts));
+          progress?.beginPhase('Database', normalizedFiles.length, 65, 90);
+          const parts = await runPool(normalizedFiles, concurrency, (file) => { progress?.tick(file); return Promise.resolve(runDatabaseEngineOnFile(file, contents.get(file) ?? '')); });
+          return mergeDatabaseResults(parts);
         })
       : Promise.resolve(previousMerged ? previousMerged.database : { issues: [], ormSignals: [], rawSqlFileCount: 0 }),
     timings.record('inventory', () =>
@@ -858,14 +875,17 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
   process.on('SIGTERM', handleSignal);
 
   try {
-    const progress = new ScanProgress(0);
-    const status = (msg: string): void => { progress.status(msg); logger.debug(msg); };
-
-    status('Loading cache...');
+    // One shared progress instance drives all phases (0 → 100%).
+    const progress = new ScanProgress(cwd);
+    progress.status('Loading cache...');
+    logger.debug('Loading cache...');
     const cache = await resolveCache(resolvedOptions);
 
-    status('Discovering files...');
-    const fileState = await discoverAndHash(resolvedOptions, cache, timings);
+    progress.status('Discovering files...');
+    logger.debug('Discovering files...');
+    const fileState = await discoverAndHash(resolvedOptions, cache, timings, progress);
+
+    const status = (msg: string): void => { progress.status(msg); logger.debug(msg); };
 
     const profile: ProjectProfile = await timings.record('profile', () => detectProjectProfile(cwd));
     const inspectorConfig = await mergePolicyPack(cwd, await loadInspectorConfig(cwd));
@@ -900,13 +920,15 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
       return reused;
     }
 
-    status('Running engines...');
-    const raw = await runEngines(resolvedOptions, fileState, cache, config, profile, timings, status);
+    const raw = await runEngines(resolvedOptions, fileState, cache, config, profile, timings, status, progress);
 
-    status('Evaluating production readiness...');
+    progress.status('Evaluating production readiness...', 92);
+    logger.debug('Evaluating production readiness...');
     const result = await mergeAndScore(raw, resolvedOptions, config, profile, metrics, startedAt, prCommentScopePaths);
     const finalResult: ScanResult = { ...result, timings: timings.timings };
 
+    progress.status('Writing report files...', 96);
+    logger.debug('Writing report files...');
     await persistAndWrite(finalResult, resolvedOptions, fileState, raw.astAnalyses, cache.previousMerged, metrics, timings);
 
     progress.complete();
