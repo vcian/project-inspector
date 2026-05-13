@@ -270,6 +270,14 @@ tbody tr:hover td{background:var(--bg-hover)}
 .bnd-btn:hover{filter:brightness(1.15)}
 .bnd-open{background:none;border:1px solid var(--border);color:var(--text-dim)}
 .bnd-open:hover{border-color:var(--blue);color:var(--blue)}
+.pv-overlay{position:fixed;inset:0;z-index:200;background:var(--bg);display:none;flex-direction:column;overflow:hidden}
+.pv-overlay.open{display:flex}
+.pv-ov-hd{display:flex;align-items:center;gap:.55rem;padding:.55rem 1.1rem;border-bottom:1px solid var(--border);background:var(--bg-card);flex-shrink:0}
+.pv-ov-icon{font-size:1.1rem;flex-shrink:0}
+.pv-ov-title{flex:1;font-size:.95rem;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pv-ov-close{background:none;border:1px solid var(--border);color:var(--text-dim);font-size:.78rem;cursor:pointer;padding:.22rem .65rem;border-radius:var(--radius);flex-shrink:0;display:flex;align-items:center;gap:.3rem}
+.pv-ov-close:hover{background:var(--bg-hover);color:var(--text);border-color:var(--text-dim)}
+.pv-ov-body{flex:1;overflow:auto;padding:1.25rem 2rem;display:flex;flex-direction:column;min-height:0}
 .pv-tabs{display:flex;border-bottom:1px solid var(--border);margin-bottom:.6rem}
 .pv-tab{font-size:.75rem;padding:.28rem .7rem;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-dim);background:none;border-top:none;border-left:none;border-right:none}
 .pv-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
@@ -354,6 +362,14 @@ tbody tr:hover td{background:var(--bg-hover)}
     </div>
     <div class="modal-body" id="modalBody"></div>
   </div>
+</div>
+<div class="pv-overlay" id="pvOverlay" role="dialog" aria-modal="true">
+  <div class="pv-ov-hd">
+    <span class="pv-ov-icon" id="pvOvIcon"></span>
+    <span class="pv-ov-title" id="pvOvTitle"></span>
+    <button class="pv-ov-close" id="pvOvClose" aria-label="Close preview">&#x2715; Close</button>
+  </div>
+  <div class="pv-ov-body" id="pvOvBody"></div>
 </div>
 <script type="application/json" id="pi-data">${jsonPayload}</script>
 <script>
@@ -950,37 +966,39 @@ function switchPvTab(btn,tab){
   var tabs=btn.closest('.pv-tabs');if(!tabs)return;
   tabs.querySelectorAll('.pv-tab').forEach(function(t){t.classList.remove('active');});
   btn.classList.add('active');
-  var mb=btn.closest('.modal-body');if(!mb)return;
-  mb.querySelectorAll('.pv-panel').forEach(function(p){p.style.display='none';});
-  var tgt=mb.querySelector('#pv-'+tab);
+  var container=tabs.parentNode;if(!container)return;
+  container.querySelectorAll('.pv-panel').forEach(function(p){p.style.display='none';});
+  var tgt=container.querySelector('#pv-'+tab);
   if(tgt)tgt.style.display='';
 }
 function openPreview(name,icon,label){
   var bf=D.bundleFiles||{};var raw=bf[name]||'';
   var isJson=name.endsWith('.json');var isArch=(name==='architecture.md');var isDb=(name==='database.md');
-  var mt=document.getElementById('modalTitle');var mb=document.getElementById('modalBody');
-  if(!mt||!mb)return;
-  mt.textContent=icon+' '+label;
-  var tabs='';
-  if(isArch||isDb)tabs='<div class="pv-tabs"><button class="pv-tab active" onclick="switchPvTab(this,&quot;vis&quot;)">Visual</button><button class="pv-tab" onclick="switchPvTab(this,&quot;md&quot;)">Markdown</button></div>';
-  else if(isJson)tabs='<div class="pv-tabs"><button class="pv-tab active" onclick="switchPvTab(this,&quot;json&quot;)">JSON</button></div>';
-  else tabs='<div class="pv-tabs"><button class="pv-tab active" onclick="switchPvTab(this,&quot;md&quot;)">Markdown</button></div>';
+  var oi=document.getElementById('pvOvIcon');
+  var ot=document.getElementById('pvOvTitle');
+  var ob=document.getElementById('pvOvBody');
+  if(!oi||!ot||!ob)return;
+  oi.textContent=icon;
+  ot.textContent=label;
+  var pvTabs='';
+  if(isArch||isDb)pvTabs='<div class="pv-tabs"><button class="pv-tab active" onclick="switchPvTab(this,&quot;vis&quot;)">Visual</button><button class="pv-tab" onclick="switchPvTab(this,&quot;md&quot;)">Markdown</button></div>';
+  else if(isJson)pvTabs='<div class="pv-tabs"><button class="pv-tab active" onclick="switchPvTab(this,&quot;json&quot;)">JSON</button></div>';
+  else pvTabs='<div class="pv-tabs"><button class="pv-tab active" onclick="switchPvTab(this,&quot;md&quot;)">Markdown</button></div>';
   var cnt='';
   if(isArch){
-    cnt='<div id="pv-vis" class="pv-panel">'+renderArchVis()+'</div>'+
+    cnt='<div id="pv-vis" class="pv-panel" style="overflow:auto">'+renderArchVis()+'</div>'+
         '<div id="pv-md" class="pv-panel" style="display:none"><div class="md-body">'+renderMd(raw)+'</div></div>';
   }else if(isDb){
-    cnt='<div id="pv-vis" class="pv-panel">'+renderDbVis()+'</div>'+
+    cnt='<div id="pv-vis" class="pv-panel" style="overflow:auto">'+renderDbVis(raw)+'</div>'+
         '<div id="pv-md" class="pv-panel" style="display:none"><div class="md-body">'+renderMd(raw)+'</div></div>';
   }else if(isJson){
     cnt='<div id="pv-json" class="pv-panel"><div class="json-body">'+renderJson(raw)+'</div></div>';
   }else{
     cnt='<div id="pv-md" class="pv-panel"><div class="md-body">'+renderMd(raw)+'</div></div>';
   }
-  mb.style.cssText='display:flex;flex-direction:column;max-height:72vh;overflow:hidden;padding:.6rem .9rem';
-  mb.innerHTML=tabs+cnt;
-  document.getElementById('modalBack').classList.add('open');
-  document.getElementById('modalClose').focus();
+  ob.innerHTML=pvTabs+cnt;
+  document.getElementById('pvOverlay').classList.add('open');
+  document.getElementById('pvOvClose').focus();
 }
 function buildBundle(){
   var pane=document.getElementById('paneBundle');
@@ -1002,13 +1020,13 @@ function buildBundle(){
     '<p class="note">All files are local &#x2014; open via <code>file://</code>. Zero CDN calls, works offline.</p>';
   entries.forEach(function(e){
     var has=!!(bf[e.h]);
-    var badge=has?'<span class="bnd-badge" style="color:var(--green);border-color:var(--green)">Generated</span>':'<span class="bnd-badge">Not yet</span>';
     var pvBtn=has&&e.pv?'<button class="bnd-btn" onclick="openPreview(&quot;'+escH(e.h)+'&quot;,&quot;'+escH(e.i)+'&quot;,&quot;'+escH(e.l)+'&quot;)">View</button>':'';
+    var openBtn=has?'<a href="'+escH(e.h)+'" class="bnd-btn bnd-open" target="_blank">Open</a>':
+      '<span style="font-size:.72rem;color:var(--text-dim);flex-shrink:0;padding:.22rem 0">Not generated</span>';
     html+='<div class="bnd-row">'+
       '<span class="bnd-icon">'+e.i+'</span>'+
       '<span class="bnd-name">'+escH(e.l)+'</span>'+
-      badge+pvBtn+
-      '<a href="'+escH(e.h)+'" class="bnd-btn bnd-open" target="_blank">Open</a>'+
+      pvBtn+openBtn+
     '</div>';
   });
   pane.innerHTML=html;
@@ -1038,8 +1056,11 @@ function showModal(t){
 }
 document.getElementById('modalClose').addEventListener('click',closeModal);
 document.getElementById('modalBack').addEventListener('click',function(e){if(e.target===this)closeModal();});
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal();});
+document.getElementById('pvOvClose').addEventListener('click',closePvOverlay);
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeModal();closePvOverlay();}});
 function closeModal(){document.getElementById('modalBack').classList.remove('open');}
+function closePvOverlay(){document.getElementById('pvOverlay').classList.remove('open');}
+window.openPreview=openPreview;window.switchPvTab=switchPvTab;
 })();
 </script>
 </body>

@@ -1,14 +1,15 @@
 # project-inspector
 
 Deterministic, offline-first static analysis for Node.js and TypeScript ecosystems.  
-`project-inspector` scans source code, lockfiles, and project structure to generate production-focused reports for security, architecture, dependencies, API exposure, performance, and release readiness.
+`project-inspector` scans source code, lockfiles, and project structure to generate production-focused reports for security, architecture, dependencies, API exposure, performance, and release readiness — delivered as a single self-contained interactive HTML dashboard and machine-readable artifacts.
 
 ## Why use this
 
 - Fast local feedback for engineering and AppSec review.
 - Stable, deterministic output suitable for CI gates and trend tracking.
 - Zero LLM dependency; works in restricted or disconnected environments.
-- Produces both human-readable reports and machine-readable artifacts (`json`, `sarif`).
+- Produces an interactive HTML dashboard, Markdown reports, and machine-readable artifacts (`json`, `sarif`).
+- No CDN dependencies — the HTML report is fully self-contained and works offline.
 
 ## Core capabilities
 
@@ -18,7 +19,21 @@ Deterministic, offline-first static analysis for Node.js and TypeScript ecosyste
 - API surface discovery (HTTP + CLI command heuristics).
 - Performance and memory anti-pattern detection.
 - Inventory and project topology mapping.
+- Database schema intelligence — ER diagram with entity/relation visualization.
 - CI gate verdict via `check`.
+
+## Interactive HTML dashboard
+
+Every scan produces `project-report/index.html` — a single-file, fully offline HTML report with the following tabs:
+
+| Tab | Content |
+|-----|---------|
+| **Issues** | Full findings table with severity badges, filters, owner, fix guidance, and compliance tags |
+| **Bundle** | All generated report files with inline Markdown and JSON preview, syntax-highlighted |
+| **Architecture** | Data-flow pipeline diagram, framework detection, architecture issues list |
+| **Database** | Auto-detected ER diagram (Collections for Mongoose, Tables for SQL/Prisma/TypeORM/Drizzle/Sequelize), relations, indexing hints, schema model cards |
+
+The dashboard requires no server — open it directly in a browser.
 
 ## Supported ecosystems
 
@@ -26,6 +41,8 @@ Deterministic, offline-first static analysis for Node.js and TypeScript ecosyste
 - React / Next.js
 - Express / Fastify
 - Heuristic NestJS support
+- MongoDB / Mongoose (Collection-level ER diagram and relation detection)
+- SQL databases via Prisma, TypeORM, Drizzle ORM, Sequelize, or raw `.sql` DDL
 - Monorepo and multi-project workspace detection (heuristic)
 
 ## Install
@@ -50,6 +67,17 @@ project-inspector scan
 ```
 
 Default output directory: `./project-report`
+
+Open the report:
+
+```bash
+# macOS
+open project-report/index.html
+# Windows
+start project-report/index.html
+# Linux
+xdg-open project-report/index.html
+```
 
 ## CLI commands
 
@@ -170,8 +198,14 @@ Reports are consolidated:
 
 | Path | Content |
 |------|---------|
+| `project-report/index.html` | **Interactive HTML dashboard** (Issues, Bundle, Architecture, Database tabs) |
 | `project-report/summary.md` | Executive summary and report index |
 | `project-report/security.md` | Security findings, OWASP mapping, hotspots, threat scenarios |
+| `project-report/architecture.md` | Architecture analysis, layer mapping, structural issues |
+| `project-report/database.md` | Database schema analysis, ER relations, indexing hints |
+| `project-report/api.md` | Discovered HTTP routes, auth heuristics, OpenAPI export |
+| `project-report/action-plan.md` | Prioritized remediation checklist |
+| `project-report/audit-summary.md` | Full cross-engine audit narrative |
 | `project-report/production-decision.md` | Human-readable production verdict |
 | `project-report/decision.json` | Machine-readable verdict for CI automation |
 | `project-report/scores.json` | Numeric scores + segment rollup when present |
@@ -267,6 +301,7 @@ Use findings as high-signal review inputs, then confirm in code review or target
 - NestJS route/auth/validation classification is decorator-oriented heuristic analysis.
 - Supply-chain insight combines offline rules with optional `npm audit` in `--online` mode.
 - Multi-project auto-detection is heuristic when no explicit workspace config exists.
+- Mongoose schema detection covers `mongoose.Schema`, `new Schema()`, and `mongoose.model()` patterns; non-standard schema factory wrappers may not be captured.
 
 ## Performance and determinism notes
 
@@ -281,12 +316,16 @@ Use findings as high-signal review inputs, then confirm in code review or target
 
 | Script | Description |
 |--------|-------------|
-| `npm run build` | Compile TypeScript to `dist/` |
+| `npm run build` | Compile TypeScript to `dist/` (runs build verification post-step) |
 | `npm run dev` | Run CLI entry in dev mode using `tsx` |
-| `npm run typecheck` | TypeScript strict type check |
+| `npm run typecheck` | TypeScript strict type check (no emit) |
 | `npm run lint` | ESLint with zero warnings |
-| `npm test` | Node test runner for configured test files |
+| `npm test` | Node test runner for all configured test files |
+| `npm run test:coverage` | Test suite with lcov + text coverage via `c8` |
+| `npm run ci` | Full local CI gate: typecheck + lint + test |
+| `npm run clean` | Remove `dist/` directory |
 | `npm run refresh-majors` | Refresh curated package major-version metadata (network required) |
+| `npm run docs:catalog` | Generate `docs/rules-catalog.md` from engine rule definitions |
 
 ### Node version
 
@@ -300,6 +339,7 @@ Use findings as high-signal review inputs, then confirm in code review or target
 - Track `scores.json` and `decision.json` over time for trend baselining.
 - Use `--rescan` for release branches and major refactors.
 - Keep `VULN_DB_URL` fresh if using private override intelligence.
+- Open `project-report/index.html` locally for the full interactive dashboard view.
 
 ## Open-source governance
 
