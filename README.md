@@ -189,41 +189,31 @@ project-inspector scan --offline
 
 ## Output files
 
-Reports are consolidated:
-
-- `security.md` contains security findings + OWASP drill-down + cross-engine hotspots + threat scenarios.
-- `performance.md` includes memory engine signals.
-- `dependencies.md` includes migration hints.
-- Legacy standalone files (`compliance.md`, `hotspots.md`, `attack-scenarios.md`, `memory.md`, `migration.md`) are removed on next write.
+Security findings, performance signals, dependency analysis, and hotspots are all embedded inside `audit-summary.md`, `action-plan.md`, and the `index.html` dashboard — there are no separate `security.md` / `performance.md` files.
 
 | Path | Content |
 |------|---------|
 | `project-report/index.html` | **Interactive HTML dashboard** (Issues, Bundle, Architecture, Database tabs) |
-| `project-report/summary.md` | Executive summary and report index |
-| `project-report/security.md` | Security findings, OWASP mapping, hotspots, threat scenarios |
-| `project-report/architecture.md` | Architecture analysis, layer mapping, structural issues |
-| `project-report/database.md` | Database schema analysis, ER relations, indexing hints |
-| `project-report/api.md` | Discovered HTTP routes, auth heuristics, OpenAPI export |
-| `project-report/action-plan.md` | Prioritized remediation checklist |
-| `project-report/audit-summary.md` | Full cross-engine audit narrative |
-| `project-report/production-decision.md` | Human-readable production verdict |
-| `project-report/decision.json` | Machine-readable verdict for CI automation |
-| `project-report/scores.json` | Numeric scores + segment rollup when present |
-| `project-report/openapi.json` | OpenAPI **3.1** export from detected HTTP routes |
-| `project-report/sbom.cdx.json` | CycloneDX SBOM from npm lockfile |
-| `project-report/osv-summary.json` | OSV vulnerability hints (skipped when offline) |
-| `project-report/pr-comment.md` | GitHub-style Markdown for PR comments / job summaries |
-| `project-report/governance-suppressions.json` | Snapshot of governance suppressions |
-| `project-report/governance-audit.jsonl` | Append-only audit entries per scan |
-| `docs/rules-catalog.md` | Generated rules catalog (`npm run docs:catalog`) |
-| `project-report/inventory.json` | File-level inventory with kind/framework/LOC/bytes |
-| `project-report/results.json` | Present when `--format json` is used |
-| `project-report/results.sarif` | Present when `--format sarif` is used (SARIF 2.1.0) |
-| `project-report/ci-result.json` | Written by `check` command |
-| `project-report/.cache/merged-scan.json` | Cached merged payload for partial refresh |
-| `project-report/.cache/file-hashes.json` | SHA-256 hash map for incremental scans |
-| `project-report/.cache/dependency-snapshot.json` | Dependency/lockfile fingerprint (includes vuln DB fingerprint) |
-| `project-report/.cache/vuln-db-meta.json` | Metadata about last vuln DB fetch and staleness |
+| `project-report/action-plan.md` | Prioritized remediation checklist with owner assignments and ETAs |
+| `project-report/audit-summary.md` | GitHub-style Markdown summary for PR comments and job summaries |
+| `project-report/api.md` | API surface review — route matrix, auth/validation coverage, endpoint access |
+| `project-report/architecture.md` | Architecture analysis, module-to-datastore map, API-to-DB flow, structural issues |
+| `project-report/database.md` | Database schema analysis, ER relations, indexing hints, ORM findings |
+| `project-report/decision.json` | Machine-readable production verdict and gate status for CI automation |
+| `project-report/scores.json` | Numeric scores across all axes plus segment rollup |
+| `project-report/openapi.json` | OpenAPI **3.1** export auto-generated from detected HTTP routes |
+| `project-report/sbom.cdx.json` | CycloneDX **1.5** SBOM from npm lockfile |
+| `project-report/governance-suppressions.json` | Snapshot of active governance suppressions |
+| `project-report/results.sarif` | SARIF **2.1.0** report (always written) |
+| `project-report/results.json` | Full scan result as JSON — only written with `--format json` |
+| `project-report/ci-result.json` | Gate verdict written by the `check` command |
+| `project-report/.cache/merged-scan.json` | Cached full scan payload for partial/incremental refresh |
+| `project-report/.cache/file-hashes.json` | SHA-256 hash map for incremental file-change detection |
+| `project-report/.cache/dependency-snapshot.json` | Dependency and lockfile fingerprint (includes vuln DB hash) |
+| `project-report/.cache/scan-meta.json` | Scan metadata and per-engine timing |
+| `project-report/.cache/vuln-db-meta.json` | Metadata about the last vuln DB fetch and staleness state |
+| `project-report/.cache/env-snapshot.json` | Environment variable key snapshot for drift detection |
+| `docs/rules-catalog.md` | Generated rules catalog — run `npm run docs:catalog` to refresh |
 
 ## CI integration
 
