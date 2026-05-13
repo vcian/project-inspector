@@ -452,7 +452,7 @@ export async function runApiEngine(cwd: string, concurrency: number, options?: A
   // Deduplicate: same method + path + file + line = same route
   const seen = new Set<string>();
   const routes = allRoutes.filter((r) => {
-    const key = `${r.method}|${r.pathPattern}|${r.file}|${r.line}`;
+    const key = `${r.method}|${r.pathPattern}|${r.file}|${String(r.line)}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

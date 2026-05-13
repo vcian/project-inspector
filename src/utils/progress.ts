@@ -33,7 +33,7 @@ export class ScanProgress {
 
   constructor(cwd: string) {
     this.cwd = cwd;
-    this.tty = process.stdout.isTTY === true;
+    this.tty = process.stdout.isTTY;
     this.startMs = Date.now();
   }
 

@@ -95,6 +95,7 @@ import {
 import type {
   ApiScanResult,
   ArchitectureScanResult,
+  AstScanResult,
   CodeSmellScanResult,
   DependencyScanResult,
   DatabaseAnalysisResult,
@@ -277,7 +278,7 @@ async function readDependencySnapshotAlias(outDir: string): Promise<DependencySn
   if (!existsSync(aliasPath)) return undefined;
   try {
     const raw = await readFile(aliasPath, 'utf8');
-    return parseJson(raw, isDependencySnapshotV1, undefined as unknown as DependencySnapshotV1) ?? undefined;
+    return parseJson(raw, isDependencySnapshotV1, undefined as unknown as DependencySnapshotV1);
   } catch {
     return undefined;
   }
@@ -490,7 +491,6 @@ export async function discoverAndHash(
 
 // ─── Stage 3: runEngines ──────────────────────────────────────────────────────
 
-type AstScanResult = import('./types.js').AstScanResult;
 
 export async function runEngines(
   options: ScanOptions,

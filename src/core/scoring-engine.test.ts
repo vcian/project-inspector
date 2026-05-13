@@ -44,13 +44,13 @@ describe('computeScores', () => {
 
   it('caps productionReadiness at 40 when there is at least one CRITICAL security issue', () => {
     const s = computeScores([makeIssue({ severity: 'CRITICAL', engine: 'security' })]);
-    assert.ok(s.productionReadiness <= 40, `expected ≤40, got ${s.productionReadiness}`);
+    assert.ok(s.productionReadiness <= 40, `expected ≤40, got ${String(s.productionReadiness)}`);
   });
 
   it('caps tests at 35 and productionReadiness at 50 for large projects with zero test files', () => {
     const s = computeScores([], { testFileCount: 0, sourceFileCount: 21 });
-    assert.ok(s.tests <= 35, `tests should be ≤35, got ${s.tests}`);
-    assert.ok(s.productionReadiness <= 50, `readiness should be ≤50, got ${s.productionReadiness}`);
+    assert.ok(s.tests <= 35, `tests should be ≤35, got ${String(s.tests)}`);
+    assert.ok(s.productionReadiness <= 50, `readiness should be ≤50, got ${String(s.productionReadiness)}`);
   });
 
   it('does NOT apply the no-tests cap for small projects (<= 20 source files)', () => {
@@ -66,12 +66,12 @@ describe('computeScores', () => {
       description: 'Secret token leaked in .env file',
     });
     const s = computeScores([issue]);
-    assert.ok(s.productionReadiness <= 30, `expected ≤30, got ${s.productionReadiness}`);
+    assert.ok(s.productionReadiness <= 30, `expected ≤30, got ${String(s.productionReadiness)}`);
   });
 
   it('floors all scores at 0 (never negative)', () => {
     const criticals = Array.from({ length: 10 }, (_, i) =>
-      makeIssue({ id: `id-${i}`, severity: 'CRITICAL', engine: 'security' }),
+      makeIssue({ id: `id-${String(i)}`, severity: 'CRITICAL', engine: 'security' }),
     );
     const s = computeScores(criticals);
     assert.equal(s.security, 0);
@@ -99,8 +99,10 @@ describe('deduplicateIssues', () => {
     ];
     const result = deduplicateIssues(dupes);
     assert.equal(result.length, 1);
-    assert.match(result[0]!.description, /3 occurrences/);
-    assert.match(result[0]!.description, /3 file/);
+    const first = result[0];
+    assert.ok(first !== undefined);
+    assert.match(first.description, /3 occurrences/);
+    assert.match(first.description, /3 file/);
   });
 
   it('treats the same title on different engines as distinct rules', () => {
@@ -112,10 +114,12 @@ describe('deduplicateIssues', () => {
   it('sets count on the grouped representative', () => {
     const title = 'Hardcoded secret';
     const dupes = Array.from({ length: 5 }, (_, i) =>
-      makeIssue({ id: `d-${i}`, title, file: `/file${i}.ts` }),
+      makeIssue({ id: `d-${String(i)}`, title, file: `/file${String(i)}.ts` }),
     );
     const result = deduplicateIssues(dupes);
-    assert.equal(result[0]!.count, 5);
+    const top = result[0];
+    assert.ok(top !== undefined);
+    assert.equal(top.count, 5);
   });
 
   it('returns an empty array for an empty input', () => {
@@ -128,7 +132,7 @@ describe('deduplicateIssues', () => {
 describe('computeHotspots', () => {
   it('returns at most 10 items regardless of input size', () => {
     const issues = Array.from({ length: 20 }, (_, i) =>
-      makeIssue({ id: `h-${i}`, title: `Issue ${i}`, severity: 'HIGH' }),
+      makeIssue({ id: `h-${String(i)}`, title: `Issue ${String(i)}`, severity: 'HIGH' }),
     );
     assert.ok(computeHotspots(issues, []).length <= 10);
   });
@@ -139,7 +143,9 @@ describe('computeHotspots', () => {
       makeIssue({ id: 'crit', severity: 'CRITICAL', title: 'Critical issue' }),
     ];
     const hotspots = computeHotspots(issues, []);
-    assert.equal(hotspots[0]!.severity, 'CRITICAL');
+    const top = hotspots[0];
+    assert.ok(top !== undefined);
+    assert.equal(top.severity, 'CRITICAL');
   });
 
   it('returns an empty array for an empty input', () => {

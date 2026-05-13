@@ -20,7 +20,7 @@ describe('scanFingerprint', () => {
     return {
       ast: { filesAnalyzed: overrides?.filesAnalyzed ?? 10, functions: [], issues: [], importGraph: [], circularDependencyChains: [] },
       trustedIssues: Array.from({ length: overrides?.trustedCount ?? 5 }, (_, i) => ({
-        id: `issue-${i}`, engine: 'security', title: 'T', severity: 'LOW' as const,
+        id: `issue-${String(i)}`, engine: 'security', title: 'T', severity: 'LOW' as const,
         file: '/a.ts', line: 1, description: '', impact: '', fix: '',
       })),
       scores: {

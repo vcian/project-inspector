@@ -58,7 +58,8 @@ const SLACK_TOKEN = 'xoxb-1234567890-ABCDEFGHIJ-abcdefghijklmnop';
       issues.some((i) => i.id.includes('slack-token')),
       `expected slack-token; got: ${JSON.stringify(issues.map((i) => i.id))}`,
     );
-    const issue = issues.find((i) => i.id.includes('slack-token'))!;
+    const issue = issues.find((i) => i.id.includes('slack-token'));
+    assert.ok(issue !== undefined, 'expected slack-token issue to exist');
     assert.equal(issue.severity, 'CRITICAL');
   });
 

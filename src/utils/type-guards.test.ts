@@ -61,7 +61,8 @@ describe('isDependencySnapshotV1', () => {
   });
 
   it('rejects a snapshot missing packageJsonSha256', () => {
-    const { packageJsonSha256: _, ...rest } = valid;
+    const rest: Record<string, unknown> = { ...valid };
+    delete rest['packageJsonSha256'];
     assert.equal(isDependencySnapshotV1(rest), false);
   });
 
