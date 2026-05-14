@@ -624,11 +624,11 @@ function buildFindings(){
     tr.innerHTML=
       '<td>'+sevBadge(t.sev)+'</td>'+
       '<td style="font-family:var(--mono);font-size:.78rem">'+esc(t.eng)+'</td>'+
-      '<td style="color:var(--text-dim);font-size:.76rem">'+esc(t.conf||'&#x2014;')+'</td>'+
-      '<td style="color:var(--text-dim)">'+esc(t.own||'&#x2014;')+'</td>'+
+      '<td style="color:var(--text-dim);font-size:.76rem">'+esc(t.conf||'—')+'</td>'+
+      '<td style="color:var(--text-dim)">'+esc(t.own||'—')+'</td>'+
       '<td style="font-family:var(--mono);font-size:.76rem"><code>'+esc(t.path)+':'+t.line+'</code></td>'+
       '<td style="max-width:280px;word-break:break-word"><a href="#" class="fi-detail" data-idx="'+idx+'">'+esc(t.title)+'</a></td>'+
-      '<td style="color:var(--text-dim);font-size:.72rem">'+esc(t.comp||'&#x2014;')+'</td>';
+      '<td style="color:var(--text-dim);font-size:.72rem">'+esc(t.comp||'—')+'</td>';
     tbody.appendChild(tr);
   });
   pane.querySelectorAll('.fi-detail').forEach(function(a){

@@ -1,8 +1,7 @@
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, normalize, resolve } from 'node:path';
-import { JsxEmit, ScriptTarget } from 'typescript';
-import { Project as MorphProject } from 'ts-morph';
+import { Project as MorphProject, ts } from 'ts-morph';
 
 import { loadAstByFileMap, saveAstByFileMap } from '../engines/ast-cache-io.js';
 import {
@@ -511,7 +510,7 @@ export async function runEngines(
   const getSourceText = (file: string): string | undefined => contents.get(normalize(file));
   const morphProject = new MorphProject({
     skipAddingFilesFromTsConfig: true,
-    compilerOptions: { allowJs: true, checkJs: false, jsx: JsxEmit.ReactJSX, target: ScriptTarget.ES2022 },
+    compilerOptions: { allowJs: true, checkJs: false, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
   });
   const morph = { project: morphProject, runExclusive: createSerialQueue(), getSourceText };
 
