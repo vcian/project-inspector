@@ -17,8 +17,8 @@ interface DbRule {
 const SQLISH = /\b(?:SELECT\s+.+\s+FROM|INSERT\s+INTO|UPDATE\s+\S+\s+SET|DELETE\s+FROM)\b/i;
 
 const RAW_SQL_HINTS: RegExp[] = [
-  /\bquery\s*\(\s*['"`]/i,
-  /\bexecute\s*\(\s*['"`]/i,
+  /\.\bquery\s*\(\s*['"`]/i,
+  /\.\bexecute\s*\(\s*['"`]/i,
   /\bsequelize\.query\s*\(/i,
   /\bprisma\.\$queryRaw(?:Unsafe)?\s*\(/i,
   /\bknex\.raw\s*\(/i,

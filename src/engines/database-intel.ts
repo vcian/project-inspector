@@ -300,6 +300,82 @@ function parseMongooseSchema(content: string, fileRel: string): { models: Mutabl
   return { models, rels };
 }
 
+/**
+ * Parses NestJS class-based Mongoose schemas (@Schema / @Prop from @nestjs/mongoose).
+ * Traditional `new Schema({})` is handled by parseMongooseSchema above.
+ */
+function parseNestjsMongooseSchema(content: string, fileRel: string): { models: MutableModel[]; rels: RelationEdge[] } {
+  const models: MutableModel[] = [];
+  const rels: RelationEdge[] = [];
+
+  const isNestMongoose =
+    /@nestjs\/mongoose/.test(content) ||
+    /SchemaFactory\.createForClass/.test(content) ||
+    (/@Schema\s*\(/.test(content) && /@Prop\s*\(/.test(content));
+  if (!isNestMongoose) {
+    return { models, rels };
+  }
+
+  const classRe = /@Schema\s*\([^)]*\)\s*(?:export\s+)?(?:abstract\s+)?class\s+(\w+)/g;
+  for (const m of content.matchAll(classRe)) {
+    const className = m[1];
+    if (className === undefined || className.length === 0) {
+      continue;
+    }
+
+    // `RegExpMatchArray#index` is guaranteed by the TS lib types for `matchAll()` here.
+    const searchFrom = m.index + m[0].length;
+    const braceIdx = content.indexOf('{', searchFrom);
+    if (braceIdx < 0) {
+      continue;
+    }
+    let depth = 1;
+    let i = braceIdx + 1;
+    while (i < content.length && depth > 0) {
+      const ch = content[i];
+      if (ch === '{') {
+        depth += 1;
+      } else if (ch === '}') {
+        depth -= 1;
+      }
+      i += 1;
+    }
+    const classBody = content.slice(braceIdx + 1, i - 1);
+
+    const fields: { name: string; typeToken: string }[] = [];
+
+    const propRe = /@Prop\s*\(([^)]*)\)\s+(?:readonly\s+)?(\w+)\??\s*:\s*([^\n;]+)/g;
+    for (const p of classBody.matchAll(propRe)) {
+      const propOptions = p[1] ?? '';
+      const propName = p[2];
+      const rawType = (p[3] ?? '').trim();
+      const propType = rawType.split(/\s*[;/]/u)[0]?.trim() ?? rawType;
+      if (propName === undefined) {
+        continue;
+      }
+
+      fields.push({ name: propName, typeToken: propType.slice(0, 48) });
+
+      const refM = /ref\s*:\s*['"](\w+)['"]/iu.exec(propOptions);
+      if (refM?.[1] !== undefined) {
+        const isArray = /\[/.test(propOptions) || /\[\]/.test(propType);
+        pushRelation(rels, className, refM[1], isArray ? '1:N' : 'N:1');
+      }
+    }
+
+    if (models.length === 0 && fields.length === 0) {
+      const fallback = fileRel.split('/').pop()?.replace(/\.schema\.[^.]+$/iu, '').replace(/[^A-Za-z0-9]/gu, '') ?? '';
+      const name = fallback.length > 0 ? fallback.charAt(0).toUpperCase() + fallback.slice(1) : className;
+      models.push({ name, source: 'mongoose', fields: [] });
+      continue;
+    }
+
+    models.push({ name: className, source: 'mongoose', fields: fields.slice(0, 40) });
+  }
+
+  return { models, rels };
+}
+
 function extractParenBody(text: string, openParenIdx: number): string {
   let depth = 1;
   let i = openParenIdx + 1;
@@ -557,6 +633,11 @@ export async function extractDatabaseIntelligence(
       const mg = parseMongooseSchema(text, f.relPath);
       models.push(...mg.models);
       for (const r of mg.rels) {
+        pushRelation(relations, r.from, r.to, r.cardinality);
+      }
+      const nmg = parseNestjsMongooseSchema(text, f.relPath);
+      models.push(...nmg.models);
+      for (const r of nmg.rels) {
         pushRelation(relations, r.from, r.to, r.cardinality);
       }
     } catch {
