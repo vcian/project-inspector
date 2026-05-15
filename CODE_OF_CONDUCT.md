@@ -52,8 +52,8 @@ an individual is officially representing the project in public spaces.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the maintainers at:
 
-- Open a private security report if applicable (see `SECURITY.md`)
-- Or contact maintainers through repository owner channels
+- Email: `support@viitorcloud.com`
+- GitHub: [open a private report](https://github.com/vcian/project-inspector/security/advisories/new) for sensitive matters
 
 All complaints will be reviewed and investigated promptly and fairly.
 

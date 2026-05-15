@@ -13,7 +13,7 @@ For usage help and troubleshooting:
 - Operating system and Node.js version.
 - Exact command used (including flags).
 - Relevant logs and error output.
-- `project-report/summary.md` and `project-report/decision.json` if applicable.
+- `project-report/audit-summary.md` and `project-report/decision.json` if applicable.
 - Steps to reproduce.
 
 ## Security issues

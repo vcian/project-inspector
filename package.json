@@ -4,11 +4,11 @@
   "description": "Offline-first deterministic project analysis CLI (AST, security, architecture)",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/BhaumikJoshi/project-inspector.git"
+    "url": "git+https://github.com/vcian/project-inspector.git"
   },
-  "homepage": "https://github.com/BhaumikJoshi/project-inspector#readme",
+  "homepage": "https://github.com/vcian/project-inspector#readme",
   "bugs": {
-    "url": "https://github.com/BhaumikJoshi/project-inspector/issues"
+    "url": "https://github.com/vcian/project-inspector/issues"
   },
   "type": "module",
   "bin": {
@@ -25,7 +25,6 @@
   },
   "files": [
     "dist",
-    "plugins",
     "schemas",
     "packs"
   ],
@@ -52,13 +51,23 @@
     "ast",
     "static-analysis",
     "nextjs",
-    "react"
+    "react",
+    "typescript",
+    "code-analysis",
+    "sarif",
+    "sbom",
+    "owasp",
+    "dependency-audit",
+    "linting",
+    "project-analysis",
+    "inspector"
   ],
-  "author": "project-inspector contributors",
+  "author": {
+    "name": "Viitorcloud Technologies Pvt. Ltd.",
+    "email": "support@viitorcloud.com",
+    "url": "https://viitorcloud.com"
+  },  
   "license": "MIT",
-  "publishConfig": {
-    "access": "public"
-  },
   "dependencies": {
     "chalk": "^5.4.1",
     "chokidar": "^5.0.0",
