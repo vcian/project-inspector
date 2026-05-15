@@ -1,5 +1,6 @@
 import { stdout } from 'node:process';
 import pino from 'pino';
+import pretty from 'pino-pretty';
 
 const VALID_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'] as const;
 type LogLevel = (typeof VALID_LEVELS)[number];
@@ -18,14 +19,12 @@ if (!isValidLevel(rawLevel)) {
 const level: LogLevel = isValidLevel(rawLevel) ? rawLevel : 'info';
 const usePretty = isTTY && process.env['NODE_ENV'] !== 'test';
 
-export const logger = pino({
-  level,
-  ...(usePretty
-    ? {
-        transport: {
-          target: 'pino-pretty',
-          options: { colorize: true, translateTime: 'SYS:standard' },
-        },
-      }
-    : {}),
-});
+export const logger = usePretty
+  ? pino(
+      { level },
+      pretty({
+        colorize: true,
+        translateTime: 'SYS:standard',
+      }),
+    )
+  : pino({ level });
