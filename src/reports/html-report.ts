@@ -365,7 +365,6 @@ tbody tr:hover td{background:var(--bg-hover)}
 </div>
 <div class="pv-overlay" id="pvOverlay" role="dialog" aria-modal="true">
   <div class="pv-ov-hd">
-    <span class="pv-ov-icon" id="pvOvIcon"></span>
     <span class="pv-ov-title" id="pvOvTitle"></span>
     <button class="pv-ov-close" id="pvOvClose" aria-label="Close preview">&#x2715; Close</button>
   </div>
@@ -462,7 +461,7 @@ function makeSortable(tableId){
       if(sortCol===i){sortDir*=-1;}else{sortCol=i;sortDir=-1;}
       tbl.querySelectorAll('th.sortable').forEach(function(h){h.classList.remove('sort-asc','sort-desc');});
       th.classList.add(sortDir===1?'sort-asc':'sort-desc');
-      th.querySelector('.sort-icon').textContent=sortDir===1?'&#x2191;':'&#x2193;';
+      th.querySelector('.sort-icon').textContent=sortDir===1?'↑':'↓';
       var tbody=tbl.querySelector('tbody');
       var rows=Array.from(tbody.querySelectorAll('tr'));
       rows.sort(function(a,b){
@@ -974,11 +973,9 @@ function switchPvTab(btn,tab){
 function openPreview(name,icon,label){
   var bf=D.bundleFiles||{};var raw=bf[name]||'';
   var isJson=name.endsWith('.json');var isArch=(name==='architecture.md');var isDb=(name==='database.md');
-  var oi=document.getElementById('pvOvIcon');
   var ot=document.getElementById('pvOvTitle');
   var ob=document.getElementById('pvOvBody');
-  if(!oi||!ot||!ob)return;
-  oi.textContent=icon;
+  if(!ot||!ob)return;
   ot.textContent=label;
   var pvTabs='';
   if(isArch||isDb)pvTabs='<div class="pv-tabs"><button class="pv-tab active" onclick="switchPvTab(this,&quot;vis&quot;)">Visual</button><button class="pv-tab" onclick="switchPvTab(this,&quot;md&quot;)">Markdown</button></div>';
