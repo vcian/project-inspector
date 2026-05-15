@@ -1,5 +1,10 @@
 # project-inspector
 
+[![npm version](https://img.shields.io/npm/v/project-inspector.svg)](https://www.npmjs.com/package/project-inspector)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/vcian/project-inspector/actions/workflows/ci.yml/badge.svg)](https://github.com/vcian/project-inspector/actions/workflows/ci.yml)
+[![npm downloads](https://img.shields.io/npm/dm/project-inspector.svg)](https://www.npmjs.com/package/project-inspector)
+
 Deterministic, offline-first static analysis for Node.js and TypeScript ecosystems.  
 `project-inspector` scans source code, lockfiles, and project structure to generate production-focused reports for security, architecture, dependencies, API exposure, performance, and release readiness — delivered as a single self-contained interactive HTML dashboard and machine-readable artifacts.
 
@@ -330,6 +335,35 @@ Use findings as high-signal review inputs, then confirm in code review or target
 - Use `--rescan` for release branches and major refactors.
 - Keep `VULN_DB_URL` fresh if using private override intelligence.
 - Open `project-report/index.html` locally for the full interactive dashboard view.
+
+## Programmatic API
+
+`project-inspector` can also be used as a library in your own scripts or tools.
+
+```ts
+import { runScan, writeScanArtifacts, computeScores } from 'project-inspector';
+
+const result = await runScan({
+  cwd: process.cwd(),
+  outDir: './project-report',
+  mode: 'deep',
+});
+
+await writeScanArtifacts(result, './project-report');
+console.log(result.scores.productionReadiness);
+```
+
+All public exports are documented with JSDoc and ship with TypeScript declaration files (`dist/index.d.ts`). Key exports:
+
+| Export | Description |
+|--------|-------------|
+| `runScan(options)` | Run a full project scan and return a `ScanResult` |
+| `writeScanArtifacts(result, outDir)` | Write all report files (HTML, Markdown, SARIF, SBOM, OpenAPI, JSON) |
+| `computeScores(result)` | Compute numeric scores across all analysis axes |
+| `buildScoreDiagnostics(result)` | Per-axis hit counts for human-readable explanations |
+| `computeHotspots(result)` | Top-10 issues ranked by exploitability heuristic |
+| `evaluateCheckGates(result)` | Evaluate a ScanResult against gate thresholds |
+| `writeSarifReport(result, outDir)` | Write a SARIF 2.1.0 report only |
 
 ## Open-source governance
 

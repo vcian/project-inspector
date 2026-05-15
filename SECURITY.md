@@ -20,7 +20,7 @@ Instead, report privately with:
 - Affected version(s) and environment details.
 - Potential impact assessment.
 
-If private reporting channels are not configured yet, use repository owner contact channels and request coordinated disclosure.
+Use [GitHub private vulnerability reporting](https://github.com/vcian/project-inspector/security/advisories/new) or email `support@viitorcloud.com` for coordinated disclosure.
 
 ## Response targets
 

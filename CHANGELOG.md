@@ -7,15 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-15
+
 ### Added
 
 - Production-grade `README.md` with complete CLI usage, CI guidance, output contracts, and limitations.
-- Open-source governance docs:
-  - `CONTRIBUTING.md`
-  - `CODE_OF_CONDUCT.md`
-  - `SECURITY.md`
-  - `CHANGELOG.md`
-- Baseline GitHub Actions CI workflow for typecheck, lint, tests, deep scan, and SARIF upload.
+- Open-source governance docs: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `SUPPORT.md`, `CHANGELOG.md`, `RELEASING.md`.
+- Baseline GitHub Actions CI workflow (typecheck, lint, tests) and automated release workflow with npm provenance.
+- `RELEASING.md` step-by-step release process documentation.
 
 ## [0.3.0] - 2026-05-05
 
@@ -25,3 +24,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Multi-engine analysis architecture (AST, security, dependencies, API, performance, memory, database, tests, lint, inventory).
 - Report generation for markdown and machine formats (`json`, `sarif`).
 - CI readiness gating via `check` and `decision.json`.
+
+[Unreleased]: https://github.com/vcian/project-inspector/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/vcian/project-inspector/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/vcian/project-inspector/releases/tag/v0.3.0
