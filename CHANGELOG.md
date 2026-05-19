@@ -7,6 +7,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-05-19
+
+### Fixed
+
+- Moved `typescript` from `devDependencies` to `dependencies` — required at runtime by `ast-engine` and `security-engine` (`JsxEmit`, `ScriptTarget` imports).
+- Package scoped to `@vcian/project-inspector` for npm organization publishing.
+
 ## [0.3.1] - 2026-05-15
 
 ### Added
@@ -25,6 +32,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Report generation for markdown and machine formats (`json`, `sarif`).
 - CI readiness gating via `check` and `decision.json`.
 
-[Unreleased]: https://github.com/vcian/project-inspector/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/vcian/project-inspector/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/vcian/project-inspector/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/vcian/project-inspector/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/vcian/project-inspector/releases/tag/v0.3.0
