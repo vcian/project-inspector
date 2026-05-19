@@ -1,9 +1,9 @@
-# project-inspector
+# @vcian/project-inspector
 
-[![npm version](https://img.shields.io/npm/v/project-inspector.svg)](https://www.npmjs.com/package/project-inspector)
+[![npm version](https://img.shields.io/npm/v/%40vcian%2Fproject-inspector.svg)](https://www.npmjs.com/package/@vcian/project-inspector)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/vcian/project-inspector/actions/workflows/ci.yml/badge.svg)](https://github.com/vcian/project-inspector/actions/workflows/ci.yml)
-[![npm downloads](https://img.shields.io/npm/dm/project-inspector.svg)](https://www.npmjs.com/package/project-inspector)
+[![npm downloads](https://img.shields.io/npm/dm/%40vcian%2Fproject-inspector.svg)](https://www.npmjs.com/package/@vcian/project-inspector)
 
 Deterministic, offline-first static analysis for Node.js and TypeScript ecosystems.  
 `project-inspector` scans source code, lockfiles, and project structure to generate production-focused reports for security, architecture, dependencies, API exposure, performance, and release readiness — delivered as a single self-contained interactive HTML dashboard and machine-readable artifacts.
@@ -55,7 +55,7 @@ The dashboard requires no server — open it directly in a browser.
 ### Global install (recommended for CI runners and local CLI use)
 
 ```bash
-npm install -g project-inspector
+npm install -g @vcian/project-inspector
 ```
 
 ### Verify install
@@ -240,7 +240,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm install -g project-inspector
+      - run: npm install -g @vcian/project-inspector
       - name: Run production gate
         run: project-inspector check --cwd . --mode deep --format sarif --format json
       - name: Upload SARIF
@@ -341,7 +341,7 @@ Use findings as high-signal review inputs, then confirm in code review or target
 `project-inspector` can also be used as a library in your own scripts or tools.
 
 ```ts
-import { runScan, writeScanArtifacts, computeScores } from 'project-inspector';
+import { runScan, writeScanArtifacts, computeScores } from '@vcian/project-inspector';
 
 const result = await runScan({
   cwd: process.cwd(),
