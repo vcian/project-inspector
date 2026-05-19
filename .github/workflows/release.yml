@@ -33,10 +33,10 @@ jobs:
       - name: Build package
         run: npm run build
 
-      - name: Publish to npm (provenance)
+      - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+        run: npm publish --access public
 
       - name: Generate release notes
         id: notes
