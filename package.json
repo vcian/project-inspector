@@ -1,5 +1,5 @@
 {
-  "name": "project-inspector",
+  "name": "@vcian/project-inspector",
   "version": "0.3.1",
   "description": "Offline-first deterministic project analysis CLI (AST, security, architecture)",
   "repository": {
@@ -23,6 +23,9 @@
       "default": "./dist/index.js"
     }
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "schemas",
@@ -36,7 +39,7 @@
     "build": "tsc -p tsconfig.build.json",
     "postbuild": "node scripts/verify-build.mjs",
     "dev": "node --import tsx src/cli.ts",
-    "prepublishOnly": "npm run clean && npm run build && npm run typecheck",
+    "prepublishOnly": "npm run clean && npm run build && npm run ci",
     "lint": "eslint src --max-warnings 0",
     "test": "node --import tsx --test src/engines/api-engine.command.test.ts src/reports/writers.exports.test.ts src/engines/security-engine.test.ts src/engines/performance-engine.test.ts src/core/scoring-engine.test.ts src/utils/type-guards.test.ts src/utils/path-safety.test.ts src/core/scan-runner.stage.test.ts",
     "test:coverage": "c8 --reporter=lcov --reporter=text npm test",
