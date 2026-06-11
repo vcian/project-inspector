@@ -5,8 +5,9 @@
 [![CI](https://github.com/vcian/project-inspector/actions/workflows/ci.yml/badge.svg)](https://github.com/vcian/project-inspector/actions/workflows/ci.yml)
 [![npm downloads](https://img.shields.io/npm/dm/%40vcian%2Fproject-inspector.svg)](https://www.npmjs.com/package/@vcian/project-inspector)
 
-Deterministic, offline-first static analysis for Node.js and TypeScript ecosystems.  
-`project-inspector` scans source code, lockfiles, and project structure to generate production-focused reports for security, architecture, dependencies, API exposure, performance, and release readiness — delivered as a single self-contained interactive HTML dashboard and machine-readable artifacts.
+**Your code never leaves your machine.** `project-inspector` is a fully offline, deterministic static-analysis CLI — no source upload, no remote server, no LLM, no telemetry. Every scan runs locally and produces identical output for identical input, so it is safe for air-gapped environments, regulated codebases, and CI gates where sending proprietary source to a cloud service is a non-starter.
+
+It scans source code, lockfiles, and project structure to generate production-focused reports for security, architecture, dependencies, API exposure, performance, and release readiness — delivered as a single self-contained interactive HTML dashboard and machine-readable artifacts (`json`, `sarif`).
 
 ## Why use this
 
@@ -15,6 +16,15 @@ Deterministic, offline-first static analysis for Node.js and TypeScript ecosyste
 - Zero LLM dependency; works in restricted or disconnected environments.
 - Produces an interactive HTML dashboard, Markdown reports, and machine-readable artifacts (`json`, `sarif`).
 - No CDN dependencies — the HTML report is fully self-contained and works offline.
+
+## How it compares to SonarQube and Semgrep
+
+`project-inspector` is **not** a replacement for SonarQube or Semgrep — it serves a different point in the workflow, and being honest about that matters:
+
+- **vs SonarQube** — SonarQube is a server-hosted quality platform with deep multi-language coverage, historical dashboards, and a rich rule engine, but it requires running (or paying for) a server and pushing your code/metrics into it. `project-inspector` runs as a single offline CLI with zero infrastructure and a self-contained HTML report. Choose SonarQube for org-wide, long-lived quality governance across many languages; choose `project-inspector` for fast, private, infrastructure-free analysis of Node.js/TypeScript projects.
+- **vs Semgrep** — Semgrep has a far larger, community-maintained rule registry and a powerful custom pattern language for cross-language taint and dataflow analysis. `project-inspector` ships a focused, curated rule set tuned for the Node.js/TS ecosystem and pairs it with architecture, dependency, API-surface, and database/ER analysis plus a production-readiness verdict in one tool. Choose Semgrep when you need breadth of rules or custom dataflow queries; choose `project-inspector` when you want an opinionated, all-in-one readiness report without writing rules.
+
+In practice these tools are complementary: many teams run `project-inspector` as a fast local/CI gate and keep Semgrep or SonarQube for deeper, language-agnostic coverage.
 
 ## Core capabilities
 
@@ -29,7 +39,25 @@ Deterministic, offline-first static analysis for Node.js and TypeScript ecosyste
 
 ## Interactive HTML dashboard
 
-Every scan produces `project-report/index.html` — a single-file, fully offline HTML report with the following tabs:
+Every scan produces `project-report/index.html` — a single-file, fully offline HTML report.
+
+### Dashboard preview
+
+**Overview** — production-readiness gauge, per-axis scores, and severity breakdown:
+
+![project-inspector dashboard — Overview tab showing readiness gauge, scores, and severity breakdown](docs/assets/dashboard-overview.png)
+
+**Performance** — engine findings with severity, source location, and title:
+
+![project-inspector dashboard — Performance tab showing performance and memory findings](docs/assets/dashboard-performance.png)
+
+**Bundle** — every generated report file, openable locally with zero CDN calls:
+
+![project-inspector dashboard — Bundle tab listing all generated report files](docs/assets/dashboard-bundle.png)
+
+> **View a sample report:** the dashboard is generated locally — run `project-inspector scan` in any project and open `project-report/index.html`. Package and source: [npm](https://www.npmjs.com/package/@vcian/project-inspector) · [GitHub](https://github.com/vcian/project-inspector).
+
+The report has the following tabs:
 
 | Tab | Content |
 |-----|---------|
@@ -377,3 +405,15 @@ All public exports are documented with JSDoc and ship with TypeScript declaratio
 ## License
 
 MIT
+
+---
+
+## About ViitorCloud
+
+[ViitorCloud Technologies](https://viitorcloud.com/?utm_source=github&utm_medium=readme&utm_campaign=project-inspector) is a global technology company delivering AI, cloud, and enterprise software engineering solutions. We build developer tooling like `project-inspector` to help teams ship secure, production-ready software.
+
+- 🌐 Website: [viitorcloud.com](https://viitorcloud.com/?utm_source=github&utm_medium=readme&utm_campaign=project-inspector)
+- 📧 Contact: [support@viitorcloud.com](mailto:support@viitorcloud.com)
+- 💼 Services: [viitorcloud.com/services](https://viitorcloud.com/services/?utm_source=github&utm_medium=readme&utm_campaign=project-inspector)
+
+Built and maintained with ❤️ by the ViitorCloud team.
