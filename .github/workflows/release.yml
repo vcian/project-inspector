@@ -1,76 +1,167 @@
-name: Release
-
-# Two ways in, guarded so they never collide:
-#  - Push to main: auto-publish to npm when package.json has a NEW version.
-#    The workflow does NOT create any tag, so the tag trigger never self-fires.
-#  - Push a vX.Y.Z tag (manual, optional): create the GitHub release for it.
-#    npm publish is skipped here because the version guard sees it's already live.
+name: Publish to npm
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
   workflow_dispatch:
-
-permissions:
-  contents: write   # create the GitHub release
-  id-token: write   # npm provenance (OIDC)
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+    inputs:
+      release_type:
+        description: "Version bump type (manual release)"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 jobs:
-  publish:
+  detect:
+    name: Detect publishable change
     runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.decide.outputs.should_publish }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+      needs_tag: ${{ steps.decide.outputs.needs_tag }}
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Decide whether to publish
+        id: decide
+        shell: bash
+        run: |
+          CURRENT="$(node -p "require('./package.json').version")"
+          TAG="v${CURRENT}"
+          SHOULD_PUBLISH="false"
+          NEEDS_TAG="false"
+
+          case "${{ github.event_name }}" in
+            push)
+              if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+                echo "Trigger: tag push (${GITHUB_REF_NAME})"
+                if [[ "v${CURRENT}" != "${GITHUB_REF_NAME}" ]]; then
+                  echo "::error::Tag (${GITHUB_REF_NAME}) does not match package.json version (v${CURRENT})."
+                  exit 1
+                fi
+                SHOULD_PUBLISH="true"
+                TAG="${GITHUB_REF_NAME}"
+              else
+                echo "Trigger: push to main"
+                PREVIOUS="$(git show HEAD~1:package.json 2>/dev/null | node -e "try { console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).version); } catch (e) { console.log(''); }")"
+                echo "Previous version: '${PREVIOUS}'"
+                echo "Current version:  '${CURRENT}'"
+                if [[ -n "${PREVIOUS}" && "${PREVIOUS}" != "${CURRENT}" ]]; then
+                  SHOULD_PUBLISH="true"
+                  NEEDS_TAG="true"
+                else
+                  echo "Version unchanged; skipping publish."
+                fi
+              fi
+              ;;
+            workflow_dispatch)
+              echo "Trigger: manual dispatch"
+              SHOULD_PUBLISH="true"
+              ;;
+          esac
+
+          {
+            echo "should_publish=${SHOULD_PUBLISH}"
+            echo "version=${CURRENT}"
+            echo "tag=${TAG}"
+            echo "needs_tag=${NEEDS_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Build, test, and publish
+    needs: detect
+    if: needs.detect.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20.x
+          registry-url: "https://registry.npmjs.org"
           cache: npm
-          registry-url: 'https://registry.npmjs.org'
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify quality gates
-        run: npm run typecheck && npm run lint && npm test
+      - name: Lint
+        run: npm run lint
 
-      - name: Build package
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
         run: npm run build
 
-      - name: Determine if version is already published
-        id: check
+      - name: Bump version (manual dispatch only)
+        id: bump
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
         run: |
-          NAME=$(node -p "require('./package.json').name")
-          VERSION=$(node -p "require('./package.json').version")
-          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
-            echo "Version $VERSION already published — skipping."
-            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          NEW_TAG=$(npm version ${{ inputs.release_type }} -m "chore(release): %s")
+          NEW_VERSION="${NEW_TAG#v}"
+          git push --follow-tags origin HEAD:${{ github.ref_name }}
+          echo "tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag (auto-detected version bump)
+        if: github.event_name == 'push' && needs.detect.outputs.needs_tag == 'true'
+        shell: bash
+        run: |
+          TAG="${{ needs.detect.outputs.tag }}"
+          if git rev-parse "${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists; reusing it."
           else
-            echo "Version $VERSION not found on npm — will publish."
-            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "${TAG}"
+          fi
+
+      - name: Resolve final tag
+        id: final
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ steps.bump.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ needs.detect.outputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish to npm
-        if: steps.check.outputs.should_publish == 'true'
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
 
-      # GitHub release is created only when a vX.Y.Z tag is pushed (manual/optional).
-      # On push-to-main the workflow publishes to npm but creates no tag or release,
-      # so the tag trigger can never be fired by this workflow.
-      - name: Create GitHub release
-        if: github.ref_type == 'tag'
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
           generate_release_notes: true
+          name: ${{ steps.final.outputs.tag }}
+          tag_name: ${{ steps.final.outputs.tag }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

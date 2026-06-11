@@ -1,6 +1,6 @@
 {
   "name": "@vcian/project-inspector",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Offline, fully static code-analysis CLI for Node.js, JavaScript & TypeScript projects (Express, NestJS, Next.js, React) — runs deterministic AST-based security, dependency, and architecture audits with zero network calls, and generates HTML reports, ER diagrams, and OpenAPI specs for code review, DevSecOps, and CI/CD.",
   "repository": {
     "type": "git",
@@ -85,7 +85,7 @@
     "name": "Viitorcloud Technologies Pvt. Ltd.",
     "email": "support@viitorcloud.com",
     "url": "https://viitorcloud.com"
-  },  
+  },
   "license": "MIT",
   "dependencies": {
     "chalk": "^5.4.1",
