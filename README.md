@@ -405,3 +405,15 @@ All public exports are documented with JSDoc and ship with TypeScript declaratio
 ## License
 
 MIT
+
+---
+
+## About ViitorCloud
+
+[ViitorCloud Technologies](https://viitorcloud.com/?utm_source=github&utm_medium=readme&utm_campaign=project-inspector) is a global technology company delivering AI, cloud, and enterprise software engineering solutions. We build developer tooling like `project-inspector` to help teams ship secure, production-ready software.
+
+- 🌐 Website: [viitorcloud.com](https://viitorcloud.com/?utm_source=github&utm_medium=readme&utm_campaign=project-inspector)
+- 📧 Contact: [support@viitorcloud.com](mailto:support@viitorcloud.com)
+- 💼 Services: [viitorcloud.com/services](https://viitorcloud.com/services/?utm_source=github&utm_medium=readme&utm_campaign=project-inspector)
+
+Built and maintained with ❤️ by the ViitorCloud team.
