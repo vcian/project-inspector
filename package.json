@@ -1,7 +1,7 @@
 {
   "name": "@vcian/project-inspector",
   "version": "0.3.2",
-  "description": "Offline-first deterministic project analysis CLI (AST, security, architecture)",
+  "description": "Offline, fully static code-analysis CLI for Node.js, JavaScript & TypeScript projects (Express, NestJS, Next.js, React) — runs deterministic AST-based security, dependency, and architecture audits with zero network calls, and generates HTML reports, ER diagrams, and OpenAPI specs for code review, DevSecOps, and CI/CD.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/vcian/project-inspector.git"
@@ -63,7 +63,23 @@
     "dependency-audit",
     "linting",
     "project-analysis",
-    "inspector"
+    "inspector",
+    "code-quality",
+    "security-scanner",
+    "devsecops",
+    "code-review",
+    "audit",
+    "nodejs",
+    "javascript",
+    "express",
+    "nestjs",
+    "ci-cd",
+    "html-report",
+    "er-diagram",
+    "openapi",
+    "dependency-analysis",
+    "tech-debt",
+    "monorepo"
   ],
   "author": {
     "name": "Viitorcloud Technologies Pvt. Ltd.",
