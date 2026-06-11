@@ -1,17 +1,21 @@
 name: Release
 
-# Auto-publish on every push to main. Publishes ONLY when the version in
-# package.json is not already on npm, so routine pushes (docs, refactors)
-# won't fail or re-publish. To release: bump the version, then push to main.
+# Two ways in, guarded so they never collide:
+#  - Push to main: auto-publish to npm when package.json has a NEW version.
+#    The workflow does NOT create any tag, so the tag trigger never self-fires.
+#  - Push a vX.Y.Z tag (manual, optional): create the GitHub release for it.
+#    npm publish is skipped here because the version guard sees it's already live.
 
 on:
   push:
     branches:
       - main
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
-  contents: write   # push the version tag and create the release
+  contents: write   # create the GitHub release
   id-token: write   # npm provenance (OIDC)
 
 concurrency:
@@ -46,7 +50,6 @@ jobs:
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
             echo "Version $VERSION already published — skipping."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
@@ -61,18 +64,13 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance
 
-      - name: Create and push version tag
-        if: steps.check.outputs.should_publish == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${{ steps.check.outputs.tag }}"
-          git push origin "${{ steps.check.outputs.tag }}"
-
+      # GitHub release is created only when a vX.Y.Z tag is pushed (manual/optional).
+      # On push-to-main the workflow publishes to npm but creates no tag or release,
+      # so the tag trigger can never be fired by this workflow.
       - name: Create GitHub release
-        if: steps.check.outputs.should_publish == 'true'
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.check.outputs.tag }}
-          name: ${{ steps.check.outputs.tag }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
