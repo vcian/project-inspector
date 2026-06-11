@@ -1,14 +1,26 @@
 name: Release
 
+# Two ways in, guarded so they never collide:
+#  - Push to main: auto-publish to npm when package.json has a NEW version.
+#    The workflow does NOT create any tag, so the tag trigger never self-fires.
+#  - Push a vX.Y.Z tag (manual, optional): create the GitHub release for it.
+#    npm publish is skipped here because the version guard sees it's already live.
+
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: write   # create the GitHub release
+  id-token: write   # npm provenance (OIDC)
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -33,28 +45,32 @@ jobs:
       - name: Build package
         run: npm run build
 
+      - name: Determine if version is already published
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+            echo "Version $VERSION already published — skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version $VERSION not found on npm — will publish."
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm
+        if: steps.check.outputs.should_publish == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance
 
-      - name: Generate release notes
-        id: notes
-        run: |
-          {
-            echo "body<<EOF"
-            echo "## Release ${{ github.ref_name }}"
-            echo
-            echo "- Automated release from CI"
-            echo "- Includes provenance-attested npm package"
-            echo
-            echo "See CHANGELOG.md for full details."
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
+      # GitHub release is created only when a vX.Y.Z tag is pushed (manual/optional).
+      # On push-to-main the workflow publishes to npm but creates no tag or release,
+      # so the tag trigger can never be fired by this workflow.
       - name: Create GitHub release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
-          body: ${{ steps.notes.outputs.body }}
