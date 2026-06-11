@@ -1,14 +1,22 @@
 name: Release
 
+# Auto-publish on every push to main. Publishes ONLY when the version in
+# package.json is not already on npm, so routine pushes (docs, refactors)
+# won't fail or re-publish. To release: bump the version, then push to main.
+
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: write   # push the version tag and create the release
+  id-token: write   # npm provenance (OIDC)
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -33,28 +41,38 @@ jobs:
       - name: Build package
         run: npm run build
 
+      - name: Determine if version is already published
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+            echo "Version $VERSION already published — skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version $VERSION not found on npm — will publish."
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm
+        if: steps.check.outputs.should_publish == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance
 
-      - name: Generate release notes
-        id: notes
+      - name: Create and push version tag
+        if: steps.check.outputs.should_publish == 'true'
         run: |
-          {
-            echo "body<<EOF"
-            echo "## Release ${{ github.ref_name }}"
-            echo
-            echo "- Automated release from CI"
-            echo "- Includes provenance-attested npm package"
-            echo
-            echo "See CHANGELOG.md for full details."
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.check.outputs.tag }}"
+          git push origin "${{ steps.check.outputs.tag }}"
 
       - name: Create GitHub release
+        if: steps.check.outputs.should_publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.check.outputs.tag }}
+          name: ${{ steps.check.outputs.tag }}
           generate_release_notes: true
-          body: ${{ steps.notes.outputs.body }}
