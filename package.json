@@ -88,7 +88,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "chalk": "^5.4.1",
+    "chalk": "^6.0.0",
     "chokidar": "^5.0.0",
     "commander": "^12.1.0",
     "fast-glob": "^3.3.3",
